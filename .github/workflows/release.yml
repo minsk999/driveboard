@@ -143,14 +143,18 @@ jobs:
           $env:DRIVEBOARD_HOME = Join-Path $env:RUNNER_TEMP 'db-home-smoke'
           # 0) 사용자가 인터넷에서 받은 zip 을 탐색기로 푼 상태를 흉내 낸다 — 모든 DLL·exe 에 Zone.Identifier(ZoneId=3).
           #    시험판 첫 실행에서 이 표식 때문에 pythonnet 이 죽었는데 CI 는 표식 없는 파일로만 시험해 놓쳤다.
-          Get-ChildItem dist\DriveBoard -Recurse -File -Include *.dll,*.pyd,*.exe | ForEach-Object {
+          #    단, 맨 위 DriveBoard.exe 는 빼고 _internal 안만 — exe 에 표식이 있으면 Start-Process 가 「보안 경고」 창을
+          #    띄우고 아무도 누를 수 없어 이 단계가 영원히 멈춘다(실제로 밟음). 사용자 PC 에선 그게 SmartScreen 창이다.
+          Get-ChildItem dist\DriveBoard\_internal -Recurse -File -Include *.dll,*.pyd,*.exe | ForEach-Object {
             Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
           }
           $mark = (Get-ChildItem dist\DriveBoard -Recurse -File -Filter Python.Runtime.dll | Select-Object -First 1).FullName
           if (-not (Get-Item -LiteralPath $mark -Stream Zone.Identifier -ErrorAction SilentlyContinue)) { throw "표식 흉내 실패" }
           # 1) 창 스택 자가 진단 — --no-open 은 webview 를 안 불러 DLL 이 있어도 로드 실패를 못 잡는다.
           #    console=False 라 출력이 없다: 종료 코드와 selftest-gui.log 로 본다.
-          $g = Start-Process -FilePath dist\DriveBoard\DriveBoard.exe -ArgumentList @('--selftest-gui') -Wait -PassThru
+          $g = Start-Process -FilePath dist\DriveBoard\DriveBoard.exe -ArgumentList @('--selftest-gui') -PassThru
+          $null = $g.Handle   # 핸들을 먼저 잡아 둬야 끝난 뒤 ExitCode 가 비지 않는다(PowerShell Start-Process 의 알려진 함정)
+          if (-not $g.WaitForExit(120000)) { Stop-Process -Id $g.Id -Force; throw "자가 진단이 2분 안에 끝나지 않았습니다" }
           Get-Content (Join-Path $env:DRIVEBOARD_HOME 'selftest-gui.log') -ErrorAction SilentlyContinue
           if ($g.ExitCode -ne 0) { throw "배포본의 창 스택(pywebview·pythonnet·WebView2)이 올라오지 않습니다 (exit $($g.ExitCode))" }
           if (Get-Item -LiteralPath $mark -Stream Zone.Identifier -ErrorAction SilentlyContinue) { throw "앱이 시작할 때 「인터넷에서 받음」 표식을 지우지 못했습니다" }
