@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>DriveBoard</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1E2028"/>
+      <stop offset="1" stop-color="#0B0C10"/>
+    </linearGradient>
+    <clipPath id="bar0"><rect x="46" y="67" width="164" height="30" rx="15"/></clipPath>
+    <clipPath id="bar1"><rect x="46" y="113" width="164" height="30" rx="15"/></clipPath>
+    <clipPath id="bar2"><rect x="46" y="159" width="164" height="30" rx="15"/></clipPath>
+  </defs>
+  <rect x="14" y="14" width="228" height="228" rx="52" fill="url(#bg)"/>
+  <rect x="15.5" y="15.5" width="225" height="225" rx="50.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="3"/>
+  <g clip-path="url(#bar0)">
+    <rect x="46" y="67" width="164" height="30" fill="#2A2C35"/>
+    <rect x="46" y="67" width="92.62" height="30" fill="#A2FF00"/>
+    <rect x="143.62" y="67" width="27.8" height="30" fill="#0A84FF"/>
+  </g>
+  <g clip-path="url(#bar1)">
+    <rect x="46" y="113" width="164" height="30" fill="#2A2C35"/>
+    <rect x="46" y="113" width="56.54" height="30" fill="#FF9F0A"/>
+    <rect x="107.54" y="113" width="27.8" height="30" fill="#BF5AF2"/>
+    <rect x="140.34" y="113" width="14.68" height="30" fill="#2FD27F"/>
+  </g>
+  <g clip-path="url(#bar2)">
+    <rect x="46" y="159" width="164" height="30" fill="#2A2C35"/>
+    <rect x="46" y="159" width="40.14" height="30" fill="#6E6BFF"/>
+    <rect x="91.14" y="159" width="17.96" height="30" fill="#FFD60A"/>
+  </g>
+</svg>

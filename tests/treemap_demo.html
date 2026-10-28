@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>트리맵 데모</title>
+<style>
+  @font-face {
+    font-family: "Pretendard Variable";
+    src: url("../ui/fonts/PretendardVariable.woff2") format("woff2-variations");
+    font-weight: 45 920; font-style: normal; font-display: swap;
+  }
+  :root {
+    --bg: #0B0C10; --surface: #121318; --line: rgba(255,255,255,.07);
+    --text: rgba(255,255,255,.92); --dim: rgba(255,255,255,.5); --acc: #A2FF00;
+    --c0:#FF9F0A; --c1:#2FD27F; --c2:#0A84FF; --c3:#30D5C8; --c4:#6E6BFF; --c5:#BF5AF2;
+    --c6:#FF4F8B; --c7:#FFD60A; --c8:#C0A37A; --c9:#8E8E93; --c10:#5C5C63;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Pretendard Variable", Pretendard, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+  .app { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 14px 16px 16px; gap: 10px; }
+  .bar { display: flex; align-items: center; gap: 10px; height: 32px; }
+  .back { width: 30px; height: 30px; padding: 0; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--text); display: grid; place-items: center; cursor: pointer; }
+  .back:disabled { opacity: .35; cursor: default; }
+  .back svg { width: 16px; height: 16px; }
+  .crumbs { display: flex; align-items: center; gap: 2px; font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .crumbs button { font: inherit; color: var(--dim); background: none; border: 0; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+  .crumbs button:hover { color: var(--text); background: rgba(255,255,255,.05); }
+  .crumbs button.cur { color: var(--text); font-weight: 650; cursor: default; background: none; }
+  .crumbs .sep { color: rgba(255,255,255,.22); font-size: 11px; }
+  .status { margin-left: auto; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px 0 8px; border-radius: 999px;
+    font-size: 11.5px; color: rgba(255,255,255,.72); background: rgba(255,255,255,.035); border: 1px solid var(--line); cursor: default;
+    transition: background .15s ease, color .15s ease; }
+  .chip:hover { background: rgba(255,255,255,.08); color: var(--text); }
+  .chip i { width: 8px; height: 8px; border-radius: 3px; }
+  .stage { position: relative; flex: 1; min-height: 0; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: var(--bg); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="bar">
+    <button class="back" id="back" type="button" aria-label="상위 폴더" disabled>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg>
+    </button>
+    <div class="crumbs" id="crumbs"></div>
+    <div class="status" id="status"></div>
+  </div>
+  <div class="legend" id="legend"></div>
+  <div class="stage" id="stage"></div>
+</div>
+<script src="../ui/treemap.js"></script>
+<script>
+(function () {
+  'use strict';
+  var Q = new URLSearchParams(location.search);
+  var STRESS = Q.get('stress') === '1';
+  var LAT = Q.has('latency') ? +Q.get('latency') : 260;
+  var SEED = Q.has('seed') ? +Q.get('seed') : 20251028;
+
+  var CATS = [
+    ['cache', '캐시·임시', '#FF9F0A'], ['render', '렌더·출력', '#2FD27F'], ['source', '촬영·소스', '#0A84FF'],
+    ['proxy', '프록시', '#30D5C8'], ['video', '기타 영상', '#6E6BFF'], ['project', '프로젝트', '#BF5AF2'],
+    ['image', '이미지·시퀀스', '#FF4F8B'], ['audio', '오디오', '#FFD60A'], ['archive', '압축·백업', '#C0A37A'],
+    ['app', '앱·시스템', '#8E8E93'], ['other', '기타', '#5C5C63']
+  ];
+  var C = { cache: 0, render: 1, source: 2, proxy: 3, video: 4, project: 5, image: 6, audio: 7, archive: 8, app: 9, other: 10 };
+  var KB = 1024, MB = KB * 1024, GB = MB * 1024, TB = GB * 1024;
+
+  function formatSize(b) {
+    b = +b || 0;
+    if (b <= 0) return '0KB';
+    var u = ['KB', 'MB', 'GB', 'TB', 'PB'], v = b / 1024, i = 0;
+    while (v >= 1000 && i < u.length - 1) { v /= 1024; i++; }
+    return (v >= 100 ? v.toFixed(0) : String(+v.toPrecision(3))) + u[i];
+  }
+
+  // ---- 결정적 난수
+  function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; var t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  var rnd = mulberry(SEED);
+  function R(a, b) { return a + (b - a) * rnd(); }
+  function RI(a, b) { return Math.floor(R(a, b + 1)); }
+  function pick(a) { return a[Math.floor(rnd() * a.length)]; }
+  function logn(sigma) { var u = Math.max(1e-9, rnd()), v = rnd(); return Math.exp(sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)); }
+  function pad(n, w) { n = String(n); while (n.length < w) n = '0' + n; return n; }
+  function weights(n, sigma) { var w = [], s = 0; for (var i = 0; i < n; i++) { var x = logn(sigma); w.push(x); s += x; } return w.map(function (x) { return x / s; }); }
+
+  // ---- 트리 생성 (전부 미리 만든다: 합계가 정확히 맞아야 트리맵·구성 막대가 맞는다)
+  var NODES = new Map(), NEXT = 1, NOW = Date.now() / 1000;
+  function dir(name, parent) {
+    var n = { id: NEXT++, kind: 'dir', name: name, path: (parent ? parent.path.replace(/\\$/, '') + '\\' : '') + name, children: [], size: 0 };
+    NODES.set(n.id, n);
+    if (parent) parent.children.push(n);
+    return n;
+  }
+  function file(parent, name, size, cat, extra) {
+    var f = { id: NEXT++, kind: 'file', name: name, path: parent.path.replace(/\\$/, '') + '\\' + name, size: Math.round(size), cat: cat,
+      mtime: NOW - Math.pow(rnd(), 1.6) * 900 * 86400 };
+    if (extra) for (var k in extra) f[k] = extra[k];
+    parent.children.push(f);
+    return f;
+  }
+  function files(parent, total, n, sigma, namer, cat) {
+    var w = weights(n, sigma);
+    for (var i = 0; i < n; i++) file(parent, namer(i), total * w[i], cat);
+  }
+  function seq(parent, name, total, frames, cat) { return file(parent, name, total, cat, { kind: 'seq', count: frames, first: 1001, last: 1000 + frames }); }
+  function loose(parent, size, cat, n) {
+    parent.children.push({ id: parent.id, kind: 'loose', name: '(이 폴더의 작은 파일들)', path: parent.path, size: Math.round(size), cat: cat,
+      cat_bytes: vec(cat, size), files: n });
+  }
+  function vec(cat, size) { var v = []; for (var i = 0; i < 11; i++) v.push(0); v[cat] = Math.round(size); return v; }
+
+  function footage(p, total) {
+    var cards = RI(2, 6), w = weights(cards, 0.5);
+    for (var i = 0; i < cards; i++) {
+      var cam = pick(['A', 'B', 'C']), card = dir(cam + pad(i + 1, 3) + '_' + pick(['카드', 'CARD', 'SSD']) + (i + 1), p);
+      var kind = pick(['sony', 'braw', 'dji', 'gopro', 'sony']), n = RI(6, 28);
+      files(card, total * w[i], n, 0.45, function (k) {
+        if (kind === 'sony') return 'C' + pad(k + 1, 4) + '.MP4';
+        if (kind === 'braw') return cam + pad(i + 1, 3) + '_C' + pad(k + 1, 3) + '_0312' + pick(['AB', 'XY', 'Q7']) + '.braw';
+        if (kind === 'dji') return 'DJI_' + pad(k + 31, 4) + '.MP4';
+        return 'GX' + pad(10000 + k * 7, 6) + '.MP4';
+      }, C.source);
+    }
+  }
+  function project(p, name, total) {
+    var pr = dir(name, p), parts = [
+      ['01_촬영본', 0.42, 'footage'], ['02_프록시', 0.09, 'proxy'], ['03_AE', 0.04, 'ae'], ['04_렌더', 0.17, 'render'],
+      ['05_음원', 0.02, 'audio'], ['06_이미지', 0.05, 'image'], ['07_시퀀스', 0.14, 'seq'], ['08_납품', 0.05, 'deliver']
+    ];
+    var use = parts.filter(function () { return rnd() > 0.12; });
+    var s = 0; use.forEach(function (u) { u[1] *= R(0.6, 1.5); s += u[1]; });
+    use.forEach(function (u) {
+      var t = total * u[1] / s * 0.985, d = dir(u[0], pr);
+      if (u[2] === 'footage') footage(d, t);
+      else if (u[2] === 'proxy') files(d, t, RI(10, 40), 0.4, function (k) { return 'C' + pad(k + 1, 4) + '_proxy.mp4'; }, C.proxy);
+      else if (u[2] === 'ae') {
+        var as = dir('Adobe After Effects Auto-Save', d);
+        files(as, t * 0.35, RI(6, 14), 0.2, function (k) { return name.slice(0, 12) + ' 자동 저장 ' + (k + 1) + '.aep'; }, C.archive);
+        var dc = dir('Disk Cache - 1', d);
+        files(dc, t * 0.25, RI(8, 20), 0.5, function (k) { return 'cache_' + pad(k * 37 % 997, 3) + '.aecache'; }, C.cache);
+        files(d, t * 0.38, RI(2, 5), 0.6, function (k) { return 'main_v' + pad(RI(3, 14), 2) + (k ? '_' + pick(['수정', '컷다운', '최종']) : '') + '.aep'; }, C.project);
+        loose(d, t * 0.02, C.project, RI(20, 90));
+      }
+      else if (u[2] === 'render') files(d, t, RI(5, 16), 0.7, function (k) { return pick(['comp', 'main', 'preview', 'final']) + '_v' + pad(k + 1, 2) + pick(['.mov', '.mp4', '.mov']); }, C.render);
+      else if (u[2] === 'audio') { files(d, t * 0.94, RI(4, 12), 0.5, function (k) { return pick(['BGM_후보_', 'VO_내레이션_take', 'SFX_모음_', 'MR_']) + pad(k + 1, 2) + '.wav'; }, C.audio); loose(d, t * 0.06, C.audio, RI(8, 40)); }
+      else if (u[2] === 'image') {
+        var ref = dir('레퍼런스', d);
+        files(ref, t * 0.3, RI(3, 9), 0.4, function (k) { return 'ref_' + pad(k + 1, 3) + '.jpg'; }, C.image);
+        files(d, t * 0.7, RI(3, 8), 0.6, function (k) { return k % 2 ? '스틸컷_' + pad(k, 3) + '.tif' : '썸네일_v' + (k + 1) + '.psd'; }, C.image);
+        d.children.forEach(function (f) { if (/\.psd$/.test(f.name)) f.cat = C.project; });
+      }
+      else if (u[2] === 'seq') {
+        var shots = RI(3, 9), w = weights(shots, 0.5);
+        for (var i = 0; i < shots; i++) {
+          var sh = dir('shot' + pad((i + 1) * 10, 3), d), passes = RI(1, 3), w2 = weights(passes, 0.3);
+          for (var j = 0; j < passes; j++) {
+            var fr = RI(120, 1500);
+            seq(sh, 'shot' + pad((i + 1) * 10, 3) + '_' + ['beauty', 'matte', 'depth'][j] + '_[####].exr', t * w[i] * w2[j], fr, C.image);
+          }
+        }
+      }
+      else if (u[2] === 'deliver') files(d, t, RI(2, 6), 0.4, function (k) { return ['TVC_30s_최종', 'TVC_15s_최종', '유튜브_업로드용', '인스타_9x16', '세로형_6s', '극장판_60s'][k] + (k < 2 ? '.mov' : '.mp4'); }, C.render);
+    });
+    file(pr, '편집_' + name.slice(0, 10) + '.prproj', total * 0.004, C.project);
+    loose(pr, total * 0.011, C.other, RI(40, 300));
+    return pr;
+  }
+
+  var PROJECTS = ['2025_브랜드필름_봄', '2025_신제품_런칭_TVC', '2025_유튜브_시리즈_EP01-12', '2025_SNS_숏폼_패키지', '2024_연말_캠페인',
+    '2024_사내행사_스케치', '2024_인터뷰_다큐', '2025_모션그래픽_리뉴얼', '2023_아카이브_리마스터', '2025_전시_미디어월',
+    '2024_뮤직비디오_A', '2025_교육영상_시즌2', '2024_라이브커머스_하이라이트', '2025_제품_3D_티저', '2023_ID_리브랜딩', '2025_광고_컷다운_15s'];
+
+  var ROOT, EMPTY_ID, ERR_ID;
+  function buildDemo() {
+    ROOT = { id: 0, kind: 'dir', name: '', path: 'D:\\', children: [], size: 0 };
+    NODES.set(0, ROOT);
+    var used = 1.40 * TB;
+    var pj = dir('Projects', ROOT), pw = weights(PROJECTS.length, 0.75);
+    PROJECTS.forEach(function (nm, i) { project(pj, nm, used * 0.46 * pw[i]); });
+    var fa = dir('Footage_Archive', ROOT), yrs = ['2022', '2023', '2024', '2025'], yw = weights(4, 0.4);
+    yrs.forEach(function (y, i) { var yd = dir(y + '_촬영본', fa), mw = weights(6, 0.5); for (var m = 0; m < 6; m++) footage(dir(y + '-' + pad(m * 2 + 1, 2) + ' 촬영', yd), used * 0.17 * yw[i] * mw[m]); });
+    var rd = dir('Render', ROOT);
+    ['출력_2024', '출력_2025', 'AME_큐'].forEach(function (nm, i) { var d = dir(nm, rd); files(d, used * [0.035, 0.045, 0.012][i], RI(10, 30), 0.8, function (k) { return pick(['브랜드', '런칭', '숏폼', '인터뷰']) + '_' + pick(['최종', '수정', 'v' + RI(2, 9)]) + '_' + pad(k + 1, 2) + pick(['.mov', '.mp4']); }, C.render); });
+    var mc = dir('Media Cache Files', ROOT);
+    files(mc, used * 0.05, 60, 0.9, function (k) { return 'C' + pad(k + 1, 4) + ' 48000.' + (k % 3 ? 'cfa' : 'pek'); }, C.cache);
+    var mcd = dir('Media Cache', ROOT); files(mcd, used * 0.006, 12, 0.6, function (k) { return 'media_' + k + '.mcdb'; }, C.cache);
+    var bk = dir('백업', ROOT); files(bk, used * 0.04, 7, 0.5, function (k) { return (2019 + k) + '_프로젝트_백업.zip'; }, C.archive);
+    var us = dir('Users', ROOT), me = dir('video', us);
+    var ad = dir('AppData', me), lc = dir('Local', ad);
+    var tmp = dir('Temp', lc); files(tmp, used * 0.006, 25, 0.9, function (k) { return 'ame_render_' + k + '.tmp'; }, C.cache);
+    var adb = dir('Adobe', lc); files(adb, used * 0.004, 8, 0.6, function (k) { return 'plugin_' + k + '.dat'; }, C.app);
+    var dl = dir('Downloads', me);
+    files(dl, used * 0.012, 14, 0.9, function (k) { return pick(['스톡_', '참고영상_', '레퍼런스_', '설치파일_']) + pad(k + 1, 2) + pick(['.mp4', '.zip', '.exe', '.mov', '.pdf']); }, C.video);
+    dl.children.forEach(function (f) { if (/\.zip$/.test(f.name)) f.cat = C.archive; else if (/\.exe$/.test(f.name)) f.cat = C.app; else if (/\.pdf$/.test(f.name)) f.cat = C.other; });
+    var vd = dir('Videos', me); files(vd, used * 0.006, 9, 0.6, function (k) { return '화면녹화_' + pad(k + 1, 2) + '.mp4'; }, C.video);
+    var pf = dir('Program Files', ROOT);
+    ['Adobe', 'Maxon Cinema 4D 2025', 'Blackmagic Design', 'NVIDIA Corporation', 'Common Files'].forEach(function (nm, i) {
+      var d = dir(nm, pf); files(d, used * [0.009, 0.004, 0.003, 0.002, 0.001][i], RI(6, 18), 0.8, function (k) { return pick(['core', 'render', 'ui', 'codec']) + k + pick(['.dll', '.exe', '.aex']); }, C.app);
+    });
+    var win = dir('Windows', ROOT); ['System32', 'WinSxS', 'Installer', 'SysWOW64'].forEach(function (nm, i) { var d = dir(nm, win); files(d, used * [0.008, 0.007, 0.004, 0.003][i], 20, 0.8, function (k) { return 'sys' + k + '.dll'; }, C.app); });
+    var st = dir('스톡_소스', ROOT); ['Artlist_영상', '배경_텍스처', '라이트릭_오버레이', '효과음_라이브러리'].forEach(function (nm, i) {
+      var d = dir(nm, st); files(d, used * [0.014, 0.006, 0.004, 0.005][i], RI(8, 24), 0.6, function (k) { return nm.split('_')[0] + '_' + pad(k + 1, 3) + ['.mov', '.png', '.mov', '.wav'][i]; }, [C.video, C.image, C.video, C.audio][i]);
+    });
+    file(ROOT, 'pagefile.sys', 32 * GB, C.app);
+    file(ROOT, 'hiberfil.sys', 12.7 * GB, C.app);
+    file(ROOT, '브랜드필름_최종_v12.mov', 18.4 * GB, C.render);
+    file(ROOT, 'TEMP_인코딩_테스트.mp4', 6.2 * GB, C.video);
+    var em = dir('빈_폴더', ROOT); EMPTY_ID = em.id;
+    var er = dir('접근_거부_폴더', ROOT); ERR_ID = er.id; file(er, 'locked.bin', 3.1 * GB, C.other);
+    if (Q.get('errors') !== '1') { ROOT.children.splice(ROOT.children.indexOf(er), 1); }
+  }
+
+  function buildStress() {
+    ROOT = { id: 0, kind: 'dir', name: '', path: 'S:\\', children: [], size: 0 };
+    NODES.set(0, ROOT);
+    for (var i = 0; i < 130; i++) {
+      var d = dir('프로젝트_' + pad(i + 1, 3) + '_' + pick(['광고', '숏폼', '인터뷰', '브랜드', '전시']), ROOT);
+      var n = RI(22, 34), base = R(0.6, 1.6) * GB;
+      for (var j = 0; j < n; j++) {
+        var c = pick([C.source, C.source, C.render, C.proxy, C.project, C.image, C.audio, C.cache]);
+        if (rnd() < 0.25) { var sd = dir('폴더_' + pad(j, 2), d); file(sd, 'clip_' + j + '.mov', base * R(0.5, 1.5), c); }
+        else file(d, 'clip_' + pad(j, 2) + '.mov', base * R(0.5, 1.5), c);
+      }
+    }
+  }
+
+  function finalize(n) {
+    if (n.kind === 'dir') {
+      var s = 0, cb = vec(0, 0), cnt = 0;
+      n.children.forEach(function (c) {
+        finalize(c);
+        s += c.size; cnt += c.files || 1;
+        var v = c.cat_bytes || vec(c.cat, c.size);
+        for (var i = 0; i < 11; i++) cb[i] += v[i];
+      });
+      n.size = s; n.cat_bytes = cb; n.files = cnt;
+      n.newest = n.children.reduce(function (m, c) { return Math.max(m, c.mtime || c.newest || 0); }, 0) || NOW - 400 * 86400;
+      var bi = 10, bv = 0; for (var i = 0; i < 11; i++) if (cb[i] > bv) { bv = cb[i]; bi = i; }
+      n.cat = bi;
+    } else if (!n.cat_bytes) { n.cat_bytes = vec(n.cat, n.size); n.files = n.count || 1; }
+  }
+
+  if (STRESS) buildStress(); else buildDemo();
+  finalize(ROOT);
+
+  // 서버(/api/tree)처럼: 깊이 2, 레벨마다 상위 200개 + 나머지는 '기타 N개'
+  function trim(n, depth) {
+    var o = { id: n.id, name: n.name, path: n.path, size: n.size, cat: n.cat, cat_bytes: n.cat_bytes ? n.cat_bytes.slice() : null, kind: n.kind };
+    if (n.count) { o.count = n.count; o.first = n.first; o.last = n.last; }
+    if (n.files) o.files = n.files;
+    if (n.mtime) o.mtime = n.mtime;
+    if (n.newest) o.newest = n.newest;
+    if (n.kind === 'dir' && depth > 0) {
+      var kids = n.children.slice().sort(function (a, b) { return b.size - a.size; });
+      var top = kids.slice(0, 200), rest = kids.slice(200);
+      o.children = top.map(function (c) { return trim(c, depth - 1); });
+      if (rest.length) {
+        var s = 0; rest.forEach(function (c) { s += c.size; });
+        o.children.push({ name: '기타 ' + rest.length + '개', size: s, cat: 10, other: true });
+      }
+    }
+    return o;
+  }
+  function load(id) {
+    return new Promise(function (res, rej) {
+      setTimeout(function () {
+        if (id === ERR_ID) { rej(new Error('이 폴더에 접근할 권한이 없어요')); return; }
+        var n = NODES.get(+id);
+        if (!n) { rej(new Error('폴더를 찾지 못했어요')); return; }
+        res(trim(n, 2));
+      }, LAT * (0.7 + 0.6 * Math.random()));
+    });
+  }
+
+  // ---- UI
+  var $crumbs = document.getElementById('crumbs'), $back = document.getElementById('back'), $status = document.getElementById('status');
+  var legend = document.getElementById('legend');
+  CATS.forEach(function (c, i) {
+    var el = document.createElement('span');
+    el.className = 'chip'; el.dataset.cat = i;
+    el.innerHTML = '<i style="background:var(--c' + i + ')"></i>';
+    el.appendChild(document.createTextNode(c[1]));
+    el.addEventListener('pointerenter', function () { tm.setHighlight(i); });
+    el.addEventListener('pointerleave', function () { tm.setHighlight(null); });
+    legend.appendChild(el);
+  });
+  function status(t) { $status.textContent = t; }
+  var tm = Treemap.create(document.getElementById('stage'), {
+    load: load,
+    colorOf: function (i) { return 'var(--c' + i + ')'; },
+    formatSize: formatSize,
+    onOpenItem: function (it) { status('열기: ' + it.name); window.demo.events.push(['open', it.name]); },
+    onContext: function (it, x, y) { status('메뉴: ' + it.name + ' @' + x + ',' + y); window.demo.events.push(['ctx', it.name, x, y]); },
+    onPath: function (crumbs) {
+      window.demo.crumbs = crumbs;
+      $crumbs.innerHTML = '';
+      crumbs.forEach(function (c, i) {
+        if (i) { var s = document.createElement('span'); s.className = 'sep'; s.textContent = '›'; $crumbs.appendChild(s); }
+        var b = document.createElement('button'); b.type = 'button';
+        b.textContent = c.name || '루트';
+        if (i === crumbs.length - 1) b.className = 'cur';
+        else b.addEventListener('click', function () { tm.open(c.id); });
+        $crumbs.appendChild(b);
+      });
+      $back.disabled = crumbs.length < 2;
+    }
+  });
+  $back.addEventListener('click', function () { tm.up(); });
+  window.addEventListener('keydown', function (e) { if (e.key === 'Backspace') tm.up(); });
+  window.demo = { tm: tm, emptyId: EMPTY_ID, errId: ERR_ID, events: [], crumbs: [], nodes: NODES.size };
+  tm.open(0);
+})();
+</script>
+</body>
+</html>

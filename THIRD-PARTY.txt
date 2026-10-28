@@ -1,0 +1,56 @@
+DriveBoard — 제3자 구성 요소 고지 (Third-party notices)
+=====================================================================
+
+DriveBoard 배포본(DriveBoard-Windows.zip)에는 아래 구성 요소가 함께 들어 있습니다.
+각 구성 요소는 자신의 라이선스를 따릅니다. DriveBoard 자체의 코드와는 별개입니다.
+
+
+1. FFmpeg 8.0.1 (ffmpeg.exe, ffprobe.exe) — GNU GPL v3
+---------------------------------------------------------------------
+위치:       bin\ffmpeg.exe, bin\ffprobe.exe (배포본의 _internal\bin\)
+용도:       영상 미리보기(포스터·프록시) 생성과 코덱 판정. 별도 실행 파일로만 호출하며
+            DriveBoard 와 링크하지 않습니다.
+빌드:       gyan.dev "essentials" 정적 빌드, 버전 8.0.1-essentials_build-www.gyan.dev
+받은 곳:    https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip
+            SHA-256 e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673
+라이선스:   GNU General Public License version 3 (GPL v3).
+            전문: bin\FFmpeg-LICENSE.txt (배포 zip 에 원문 그대로 동봉)
+                  https://www.gnu.org/licenses/gpl-3.0.txt
+            빌드 구성·포함 라이브러리 목록: bin\FFmpeg-README.txt
+소스 코드:  FFmpeg 커밋 894da5ca7d (빌드 README 의 "Source Code" 항목)
+            https://github.com/FFmpeg/FFmpeg/commit/894da5ca7d
+            릴리스 소스 묶음: https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+            빌드 스크립트·외부 라이브러리 정보: https://www.gyan.dev/ffmpeg/builds/
+            위 주소에서 소스를 받을 수 없게 되면 저장소 이슈(https://github.com/minsk999/driveboard/issues)로
+            알려 주세요.
+FFmpeg 는 FFmpeg 프로젝트 창시자 Fabrice Bellard 의 상표이며, DriveBoard 는 FFmpeg 프로젝트와 무관합니다.
+
+
+2. Pretendard (PretendardVariable.woff2) — SIL Open Font License 1.1
+---------------------------------------------------------------------
+위치:       ui/fonts/PretendardVariable.woff2
+저작권:     Copyright (c) 2021, Kil Hyung-jin, with Reserved Font Name Pretendard.
+출처:       https://github.com/orioncactus/pretendard
+라이선스:   SIL Open Font License, Version 1.1 (OFL 1.1)
+            전문: ui/fonts/Pretendard-OFL.txt (배포본의 _internal\ui\fonts\Pretendard-OFL.txt)
+
+
+3. pywebview — BSD 3-Clause License
+---------------------------------------------------------------------
+용도:       네이티브 창(WebView2). 배포본에 Python 패키지로 포함됩니다.
+저작권:     Copyright (c) 2014-2017, Roman Sirokov and contributors
+출처:       https://github.com/r0x0r/pywebview
+라이선스:   BSD 3-Clause — https://github.com/r0x0r/pywebview/blob/master/LICENSE
+            pywebview 가 함께 싣는 Microsoft Edge WebView2 SDK 구성 요소
+            (Microsoft.Web.WebView2.Core.dll, Microsoft.Web.WebView2.WinForms.dll)는
+            Microsoft 의 WebView2 SDK 라이선스를 따릅니다.
+            pythonnet·clr_loader(MIT), bottle(MIT), proxy_tools(BSD) 도 pywebview 의존성으로 포함됩니다.
+
+
+4. Python — Python Software Foundation License (PSF)
+---------------------------------------------------------------------
+용도:       PyInstaller 로 묶은 Python 런타임(python3.dll 등)과 표준 라이브러리.
+출처:       https://www.python.org/
+라이선스:   PSF License Agreement — https://docs.python.org/3/license.html
+            PyInstaller 부트로더는 GPL v2 + 예외 조항(배포물에 GPL 을 강제하지 않음)을 따릅니다.
+            https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt

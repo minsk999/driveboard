@@ -1,0 +1,55 @@
+# 단위 시험 — push·PR 마다 Ubuntu·Windows × Python 3.10·3.12 (표준 라이브러리만, 네트워크 없음).
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.10', '3.12']
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      DRIVEBOARD_NO_UPDATE_CHECK: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ffmpeg (Linux — media tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -version | head -n 1
+
+      - name: Ensure app icon
+        shell: bash
+        run: |
+          if [ ! -f build/icon.ico ]; then python tests/test_packaging.py --write-icon; fi
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          export DRIVEBOARD_HOME="$RUNNER_TEMP/db-home"
+          python -m unittest discover -s tests -v

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="db-token" content="__DB_TOKEN__">
+<title>DriveBoard</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="projects.css">
+</head>
+<body>
+<div id="app">
+  <aside id="rail" aria-label="드라이브">
+    <div class="logo" aria-label="DriveBoard">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect class="lm1" x="2.5" y="4" width="19" height="4" rx="2"/>
+        <rect class="lm2" x="2.5" y="10" width="13" height="4" rx="2"/>
+        <rect class="lm3" x="2.5" y="16" width="16" height="4" rx="2"/>
+      </svg>
+      <b>DriveBoard</b>
+    </div>
+    <nav class="rnav" id="rnav" aria-label="화면"></nav>
+    <div class="rail-list scroll" id="railList"></div>
+    <div id="binZone" role="button" tabindex="0">
+      <span class="bz-ic"></span>
+      <span class="bz-tx">
+        <span class="bz-idle"><span class="bz-t">휴지통</span><span class="bz-s num" id="bzSub">계산하는 중</span></span>
+        <span class="bz-drop"><span class="bz-t" id="bzDropT">여기에 놓으면</span><span class="bz-s" id="bzDropS">휴지통으로 보내요</span></span>
+      </span>
+      <button class="btn sm ghost bz-btn" id="bzEmpty" type="button">비우기</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header id="top">
+      <button class="ibtn sm" id="backBtn" type="button" data-tip="뒤로 (Backspace)" aria-label="뒤로" hidden></button>
+      <nav class="crumbs" id="crumbs" aria-label="위치"></nav>
+      <div class="search" id="search">
+        <span id="searchIc"></span>
+        <input id="searchIn" type="text" autocomplete="off" spellcheck="false" placeholder="모든 드라이브에서 검색">
+        <kbd>/</kbd>
+        <button class="clr" id="searchClr" type="button" data-tip="지우기" aria-label="검색어 지우기"></button>
+      </div>
+      <button class="updpill" id="updPill" type="button" hidden></button>
+      <button class="btn" id="scanBtn" type="button"></button>
+      <button class="jobpill" id="jobPill" type="button" data-tip="작업 기록" aria-label="작업 기록">
+        <span class="jp-ic" id="jpIc"></span><span class="jp-t num" id="jpT"></span>
+      </button>
+      <button class="ibtn" id="setBtn" type="button" data-tip="설정" aria-label="설정"></button>
+      <div class="offline" id="offline"></div>
+    </header>
+    <div id="viewWrap">
+      <div id="view" class="scroll"></div>
+    </div>
+  </main>
+</div>
+
+<div id="tray" role="region" aria-label="선택한 항목">
+  <div class="tr-chip">
+    <span class="ck on" id="trCk"></span>
+    <div class="tr-count"><span class="n num" id="trN">0개</span><span class="s num" id="trS">0KB</span></div>
+  </div>
+  <div class="tr-compw">
+    <div class="tr-comp" id="trComp"></div>
+    <div class="tr-comp-l" id="trCompL"></div>
+  </div>
+  <div class="sp"></div>
+  <div class="acts">
+    <button class="btn danger" id="trRecycle" type="button"></button>
+    <button class="btn primary" id="trMove" type="button"></button>
+    <button class="btn" id="trCopy" type="button"></button>
+    <button class="btn ghost" id="trClear" type="button">선택 해제</button>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+<div id="layer"></div>
+<div id="dragChip"></div>
+<div id="tip" role="tooltip"></div>
+
+<script src="treemap.js"></script>
+<script src="projects.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

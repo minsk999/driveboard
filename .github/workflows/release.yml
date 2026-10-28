@@ -1,0 +1,171 @@
+# DriveBoard 릴리스 — v* 태그를 올리면 Windows 배포본을 만들어 GitHub 릴리스에 붙인다 (SPEC-2 §E).
+#   태그 vX.Y.Z 는 core/version.py 의 VERSION 과 같아야 한다.
+#   ffmpeg 는 버전·sha256 을 고정해 받는다(core/version.py · build.bat 과 같은 값 — tests/test_packaging.py 가 대조).
+#   태그에 '-' 가 있으면(v1.1.0-rc.1) prerelease 로 올린다 → releases/latest·업데이트 알림에 안 잡힌다.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAG: ${{ github.ref_name }}
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      DRIVEBOARD_NO_UPDATE_CHECK: '1'
+      DRIVEBOARD_REQUIRE_FFMPEG: '1'
+      FFMPEG_VERSION: '8.0.1'
+      FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip
+      FFMPEG_SHA256: e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673
+      FFMPEG_DIR: ffmpeg-8.0.1-essentials_build
+      PYWEBVIEW_VERSION: '5.4'
+      PYINSTALLER_VERSION: '6.16.0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Check tag matches core/version.py VERSION
+        run: |
+          $ver = python -c "import sys; sys.path.insert(0, '.'); from core.version import VERSION; print(VERSION)"
+          if ($LASTEXITCODE -ne 0 -or -not $ver) { throw "core/version.py 를 읽지 못했습니다" }
+          $ver = $ver.Trim()
+          if ($env:TAG -ne "v$ver") { throw "태그 '$env:TAG' 와 core/version.py VERSION '$ver' 이 다릅니다 (태그는 v$ver 이어야 합니다)" }
+          python -c "import os, sys; sys.path.insert(0, '.'); from core import version as v; sys.exit(0 if (v.FFMPEG_SHA256, v.FFMPEG_URL, v.FFMPEG_DIR) == (os.environ['FFMPEG_SHA256'], os.environ['FFMPEG_URL'], os.environ['FFMPEG_DIR']) else 1)"
+          if ($LASTEXITCODE -ne 0) { throw "release.yml 의 ffmpeg 고정값이 core/version.py 와 다릅니다" }
+          Write-Host "version OK: $ver"
+
+      - name: Install build tools (pywebview, PyInstaller)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pywebview==$env:PYWEBVIEW_VERSION" "pyinstaller==$env:PYINSTALLER_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "pip install 실패" }
+
+      - name: Download ffmpeg (pinned, sha256 verified)
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:FFMPEG_SHA256) { throw "ffmpeg sha256 불일치: $hash (기대값 $env:FFMPEG_SHA256)" }
+          $x = Join-Path $env:RUNNER_TEMP 'ffmpeg-x'
+          Expand-Archive -Path $zip -DestinationPath $x -Force
+          $src = Join-Path $x $env:FFMPEG_DIR
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Copy-Item -Path (Join-Path $src 'bin\ffmpeg.exe') -Destination bin\ffmpeg.exe
+          Copy-Item -Path (Join-Path $src 'bin\ffprobe.exe') -Destination bin\ffprobe.exe
+          Copy-Item -Path (Join-Path $src 'LICENSE') -Destination bin\FFmpeg-LICENSE.txt
+          Copy-Item -Path (Join-Path $src 'README.txt') -Destination bin\FFmpeg-README.txt
+          & .\bin\ffmpeg.exe -hide_banner -version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe 실행 실패" }
+          & .\bin\ffprobe.exe -hide_banner -version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { throw "ffprobe.exe 실행 실패" }
+
+      - name: Ensure app icon
+        run: |
+          if (-not (Test-Path build\icon.ico)) { python tests\test_packaging.py --write-icon }
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path build\icon.ico)) { throw "build\icon.ico 를 만들지 못했습니다" }
+
+      - name: Unit tests
+        run: |
+          $env:DRIVEBOARD_HOME = Join-Path $env:RUNNER_TEMP 'db-home-tests'
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw "단위 시험 실패" }
+
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller --noconfirm --clean --workpath build\pyi --distpath dist driveboard.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller 실패" }
+          foreach ($p in @('dist\DriveBoard\DriveBoard.exe',
+                           'dist\DriveBoard\_internal\ui\index.html',
+                           'dist\DriveBoard\_internal\ui\fonts\Pretendard-OFL.txt',
+                           'dist\DriveBoard\_internal\bin\ffmpeg.exe',
+                           'dist\DriveBoard\_internal\bin\ffprobe.exe',
+                           'dist\DriveBoard\_internal\bin\FFmpeg-LICENSE.txt')) {
+            if (-not (Test-Path $p)) { throw "배포본에 빠진 파일: $p" }
+          }
+          Copy-Item THIRD-PARTY.txt dist\DriveBoard\THIRD-PARTY.txt
+          $info = (Get-Item dist\DriveBoard\DriveBoard.exe).VersionInfo
+          Write-Host "exe ProductVersion: $($info.ProductVersion)"
+          if ($info.ProductVersion -ne $env:TAG.Substring(1)) { throw "exe 버전 리소스가 태그와 다릅니다: $($info.ProductVersion)" }
+
+      - name: Smoke test frozen app
+        run: |
+          $fake = Join-Path $env:RUNNER_TEMP 'db-fake-empty'
+          New-Item -ItemType Directory -Force -Path $fake | Out-Null
+          $env:DRIVEBOARD_HOME = Join-Path $env:RUNNER_TEMP 'db-home-smoke'
+          $port = 18790
+          $p = Start-Process -FilePath dist\DriveBoard\DriveBoard.exe -ArgumentList @('--no-open', '--port', "$port", '--fake', $fake) -PassThru
+          $ok = $false
+          try {
+            for ($i = 0; $i -lt 40 -and -not $ok; $i++) {
+              Start-Sleep -Milliseconds 750
+              if ($p.HasExited) { throw "앱이 바로 종료됐습니다 (exit $($p.ExitCode))" }
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 3
+                if ($r.StatusCode -eq 200 -and $r.Content -match '<html') { $ok = $true }
+              } catch { }
+            }
+          } finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+          if (-not $ok) {
+            Get-ChildItem $env:DRIVEBOARD_HOME -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 50 }
+            throw "배포본이 UI 를 내보내지 못했습니다"
+          }
+          Write-Host "smoke OK"
+
+      - name: Zip DriveBoard-Windows.zip
+        run: |
+          Compress-Archive -Path dist\DriveBoard -DestinationPath DriveBoard-Windows.zip -CompressionLevel Optimal -Force
+          $h = (Get-FileHash -Algorithm SHA256 -Path DriveBoard-Windows.zip).Hash.ToLowerInvariant()
+          "$h  DriveBoard-Windows.zip" | Out-File -FilePath DriveBoard-Windows.zip.sha256 -Encoding ascii
+          "ZIP_SHA256=$h" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "zip: $((Get-Item DriveBoard-Windows.zip).Length) bytes, sha256 $h"
+
+      - name: Release notes (Korean)
+        run: |
+          $body = @"
+          ## 설치
+          1. 아래 **DriveBoard-Windows.zip** 을 받습니다.
+          2. 압축을 풀고 폴더를 원하는 곳에 둡니다(설치 과정은 없어요).
+          3. 폴더 안의 **DriveBoard.exe** 를 실행합니다.
+
+          > 서명하지 않은 앱이라 처음 실행할 때 **「Windows의 PC 보호」(SmartScreen)** 창이 뜰 수 있어요. **[추가 정보] → [실행]** 을 누르면 열립니다.
+
+          - 새 버전으로 바꿀 때는 새 zip 을 받아 폴더째 바꿔 주세요. 설정과 색인은 사용자 폴더(%LOCALAPPDATA%\DriveBoard)에 있어 그대로 남아요.
+          - 포함된 FFmpeg $env:FFMPEG_VERSION 은 GPL v3 입니다. 자세한 고지는 압축 안의 THIRD-PARTY.txt 를 봐 주세요.
+          - SHA-256 (DriveBoard-Windows.zip): ``$env:ZIP_SHA256``
+          "@
+          Set-Content -Path release-body.md -Value $body -Encoding utf8
+          Get-Content release-body.md
+
+      - name: Create GitHub release (softprops/action-gh-release)
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: DriveBoard ${{ github.ref_name }}
+          body_path: release-body.md
+          files: |
+            DriveBoard-Windows.zip
+            DriveBoard-Windows.zip.sha256
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}

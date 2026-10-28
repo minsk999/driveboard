@@ -1,0 +1,191 @@
+# DriveBoard 스펙 2 — 팀 배포 · 프로젝트 보기 · 영상 미리보기
+
+> SPEC.md(1차)에 더하는 정본. 1차 구현이 끝난 뒤 이 문서대로 확장한다. 충돌하면 이 문서가 이긴다.
+
+## A. 팀원 PC 대응 (드라이브 1~2개)
+
+팀원 PC는 보통 **C(SSD) 하나** 또는 **C(SSD) + D(HDD)** 이다. 7개 드라이브는 팀장 PC 뿐이다.
+
+- 모든 화면이 드라이브 1개·2개에서도 **비어 보이지 않게** 설계한다.
+  - 드라이브가 1개면 홈의 「드라이브 카드 그리드」 대신 그 드라이브의 상세(카테고리 목록)를 홈 아래에 바로 펼친다.
+  - 레일의 드라이브 목록은 1개여도 자연스럽게(빈 공간에 프로젝트·추천 바로가기).
+- **이동 대상**을 넓힌다. 스캔 대상(고정 드라이브) 외에:
+  - **외장·USB 드라이브**(`DRIVE_REMOVABLE`)와 **네트워크 드라이브**(`DRIVE_REMOTE`, 매핑된 NAS 문자)도 이동 대상에 나온다(기본은 스캔 안 함).
+  - **「폴더 선택…」**: 네이티브 폴더 선택 창(pywebview `FOLDER_DIALOG`)으로 아무 폴더나 대상으로 고른다. 브라우저 모드에서는 경로 입력 칸.
+  - `/api/state.drives[]` 에 `scan:bool`(스캔 대상 여부), `kind` 에 `'network'` 추가. 설정에서 드라이브별 스캔 여부를 켜고 끈다.
+  - 네트워크 대상 이동은 느릴 수 있으니 속도·남은 시간을 반드시 보여 주고, 검증은 기본 `quick` 유지.
+- 관리자 권한 없이 동작한다(접근 거부 폴더는 「확인 불가」로 센다).
+
+### A.1 외장 저장장치 · NAS (스캔·정리 대상으로 정식 지원)
+사용자 요청: 외장 HDD, 외장 SSD, USB 플래시 드라이브, NAS(**ORICO 간이 NAS** — SMB 공유로 접근).
+- **드라이브 종류**(`kind`): `ssd | hdd | usb | network | unknown`, 그리고 `external:bool`.
+  - ★외장 HDD/SSD 는 Windows 에서 대부분 `DRIVE_FIXED` 로 보인다 → `IOCTL_STORAGE_QUERY_PROPERTY(StorageDeviceProperty)` 의 `BusType == BusTypeUsb(7)`(또는 1394·SD·MMC)이면 `external:true`. 플래시 드라이브는 `DRIVE_REMOVABLE` → `usb`.
+  - 아이콘: 내장 SSD/HDD · 외장 디스크(케이블 달린 디스크) · USB 메모리 · NAS(서버) 를 구분한다.
+- **NAS**:
+  - 매핑된 네트워크 드라이브(`DRIVE_REMOTE`, 예 `Z:`)는 자동으로 목록에 나온다(`kind:'network'`). 라벨 = 공유 이름(`WNetGetConnectionW` 로 `\\192.168.0.10\video` 를 얻어 표시).
+  - 매핑 안 한 공유도 **「NAS 추가」**(설정·레일 하단 [+])로 UNC 경로 `\\ORICO\share` 또는 `\\192.168.x.x\share` 를 직접 등록할 수 있다 → `settings.network_locations=[{path,label}]`. 드라이브 문자가 없으니 내부 키는 `N1`, `N2`… 로 쓰고 화면에는 라벨을 쓴다. 모든 경로 처리(`safety`, `model`, `ops`)가 UNC 루트(`\\server\share\`)를 드라이브 루트처럼 다뤄야 한다.
+  - 용량: `GetDiskFreeSpaceExW` 는 UNC 에도 동작한다(공유가 보고하는 값).
+  - 휴지통: SMB 공유는 Windows 휴지통이 **없다** → 「휴지통으로」가 영구 삭제가 된다. 그래서 NAS·USB 메모리(대부분 휴지통 없음)에서는 버튼을 **「삭제(복구 불가)」** 로 바꾸고 빨간 확인 시트 + 이름 재입력 없이 체크박스 확인 1회를 요구한다. `FOF_WANTNUKEWARNING` 은 그대로 둔다(이중 안전).
+  - 스캔은 네트워크라 느리다 → 기본 **꺼짐**, 드라이브 카드에 [스캔] 버튼. 진행 중 속도 표시, 취소 가능. 타임아웃·끊김은 그 드라이브만 오류로, 앱 전체를 막지 않는다.
+  - 사용자 설명: ORICO NAS 는 탐색기 「네트워크」에서 장치를 찾아 열고, **녹색 띠가 있는 공유 폴더 아이콘**으로 보인다 = **SMB 공유**다. 경로는 `\\<장치이름 또는 IP>\<공유이름>`. (참고로 받은 아이콘 이미지는 웹 예시라 공유 이름은 알 수 없다 — 이름을 가정하지 말 것.)
+    ★「NAS 추가」는 장치 이름만 넣어도 되게 한다: `\\ORICO` 를 받으면 `NetShareEnum`(netapi32, 레벨 1, `STYPE_DISKTREE` 만)으로 공유 목록을 보여 주고 체크해서 추가. 실패하면 공유 이름까지 직접 입력.
+    ★**보호 경로 규칙(§9 SPEC.md)은 내장 Windows 드라이브용이다 — 네트워크·외장 위치에는 적용하지 않는다.** 그대로 적용하면 공유·외장 디스크 안에 우연히 `Users`·`EFI`·`Windows` 같은 이름의 폴더가 있을 때 사용자 데이터가 시스템 폴더로 오인돼 막힌다. 네트워크·외장에서는 「루트 자체」와 `$RECYCLE.BIN`·`System Volume Information`·`.DS_Store`·`@eaDir`·`#recycle`(NAS 시스템 폴더)만 막는다. 분류의 app(시스템) 문맥 규칙도 내장 드라이브에서만.
+- **연결 해제된 장치**: 인덱스는 볼륨 시리얼(네트워크는 UNC 경로 해시)로 저장하므로, 빠진 외장 디스크도 「연결 안 됨 · 마지막 스캔 3일 전」 회색 카드로 남겨 **무엇이 들어 있었는지 볼 수 있다**(조작 버튼은 비활성). 설정에서 기록 삭제.
+  - 다시 꽂으면 드라이브 문자가 바뀌어도 시리얼로 같은 장치로 알아본다.
+- **보관(archive) 시나리오**가 핵심: 내장 드라이브의 오래된 프로젝트 폴더 → 외장/NAS 로 이동. 추천 카드 「오래된 프로젝트를 외장·NAS 로 보관」은 연결된 외장/NAS 가 있을 때만 그 이름을 넣어 제안.
+- 이동 중 장치가 빠지면: 진행 중 파일은 실패, 원본은 그대로(검증 전에는 원본을 지우지 않는 규칙이 이미 보장), 작업 `partial` + 「장치 연결이 끊겼어요」.
+
+## B. 프로젝트 보기 (새 최상위 화면 「프로젝트」)
+
+### B.1 팀 파일명 규칙 (BRC)
+영상팀은 배치리네이머의 규칙을 쓴다: `날짜_광고주_캠페인_페이지p_작업내용_해상도_작업자_@작업종류_작업구분`.
+프로젝트 **폴더** 이름도 대체로 이 형태다. 실제 예: `260803_소담코스_녹차_진정크림_배너결합_KMS`
+(날짜 2026-08-03, 광고주 소담코스, 캠페인 녹차, 작업내용 진정크림_배너결합, 작업자 KMS).
+더 간단하거나 다른 형식도 섞여 있다(`소담코스_진정크림`, `2026-08_소담코스_런칭`, `20260803_소담코스`).
+
+- 파서: `core/brc.py` = `tests/brc_reference.js`(BannerNode 의 BRC 블록 원문)의 **충실한 파이썬 이식**.
+  `parse(name) -> {client, campaign, page, task, resolution, worker, jobKind, workType}`.
+  `tests/test_brc.py` 가 **node 로 참조 구현을 실행해 차등 비교**한다(이름 200개 이상: 실제 예 + 변형 + 경계). node 가 없으면 그 시험만 건너뛴다.
+  - 작업자 이니셜 목록은 참조 구현의 기본값(`KMS HYC JJH PNJ KBH GJH`)에 **설정의 작업자 목록을 더한다**.
+- 날짜: 첫 토큰이 6자리 `YYMMDD`(BRC `_isDate`) 또는 8자리 `YYYYMMDD`, 또는 `YYYY-MM-DD`·`YYYY.MM.DD`·`YYYY-MM`·`YYYY_MM` 이면 그 날짜(`date_source:'name'`).
+  유효하지 않은 날짜(13월 등)는 무시. 없으면 폴더 하위 최신 mtime(`date_source:'mtime'`).
+  6자리 연도는 `20YY`.
+
+### B.2 프로젝트 폴더 판정 (`core/projects.py`)
+스캔된 인덱스에서 계산(디스크 재방문 없음). 디렉터리 하나가 프로젝트인 조건(위에서부터):
+1. 설정 `project_roots`(폴더 목록)의 **직속 자식 폴더**.
+2. 이름이 날짜 토큰으로 시작하는 폴더(`260803_…`, `20260803_…`, `2026-08-03 …`).
+3. 직속 파일 또는 한 단계 아래에 `aep/aepx/prproj/drp` 가 있는 폴더.
+- 조상 중에 이미 프로젝트가 있으면 **프로젝트가 아니다**(맨 위가 이긴다 — `260805_수정본` 같은 하위 날짜 폴더는 부모 프로젝트에 속한다).
+- 시스템(app) 문맥·캐시 문맥 아래는 제외. 크기 1MB 미만 제외.
+- 레코드:
+```
+{key:"<drive>:<did>", drive, did, path, name,
+ date:"2026-08-03", date_source:'name'|'mtime', year, month,
+ client, client_raw, title (캠페인+작업내용을 공백으로), worker, worker_name, job_kind,
+ size, cat_bytes:[NCAT], files, newest, preview: <media>|null, videos: n}
+```
+- **광고주 정규화**: `settings.client_aliases = {"한결":"한결증권", ...}` 를 적용(대소문자·공백·전각 무시). 광고주를 못 찾으면 `"미분류"`.
+- **작업자 이름**: `settings.workers = {"KMS":"홍길동", ...}`(사용자가 설정에서 채운다; 저장소 기본값에 실명을 넣지 않는다).
+
+### B.3 미리보기 영상 고르기
+「폴더 안의 영상(여러 개면 가장 최근에 만들어진 것)」.
+- 스캐너가 디렉터리마다 **대표 영상 후보 1개**를 기록한다(크기 무관 — 배너 결합 결과물은 수 MB 라 큰 파일 표에 없다):
+  `d_vid[did] = (name, size, mtime, cat)` 희소 dict(영상이 있는 디렉터리만). 캐시·프록시 카테고리는 후보가 아니다.
+- 프로젝트 대표 = 서브트리 후보 중 **카테고리 우선순위 render > video(기타) > source** 다음 **mtime 최신**.
+  ★생성 시각(ctime/birthtime)을 쓰지 않는다 — Windows 는 복사하면 생성 시각이 복사한 순간이 되어 옮겨 온 촬영본이 「가장 최근」이 된다. 렌더 결과물은 mtime=만든 시각이다.
+- 프로젝트 상세에는 서브트리의 영상 목록(최대 200개, 위 우선순위·최신순)을 보여 준다 → 큰 파일 표 + d_vid 로 구성하되, 작은 영상까지 보려면 상세를 열 때 그 프로젝트 폴더만 **디스크에서 한 번 다시 훑는다**(동기, 수천 파일 이하라 빠르다).
+
+### B.4 화면
+레일 맨 위 내비: **저장 공간**(1차 홈) / **프로젝트**. 프로젝트 화면:
+- 상단: 보기 전환 세그먼트 `광고주별 | 시간순 | 연·월별`, 검색, 필터(드라이브·작업자·기간), 정렬(최신·크기·이름).
+- **광고주별**: 광고주 섹션(이름·프로젝트 수·합계 용량·구성 막대) → 가로 카드 줄. 섹션 접기.
+- **시간순**: 최신부터 카드 그리드, 월이 바뀌는 곳에 「2026년 8월」 구분선(스티키 헤더).
+- **연·월별**: 연도 칩 → 월별 섹션(12칸 미니 막대 차트로 월별 용량을 먼저 보여 주고, 누르면 그 달로 스크롤).
+- **프로젝트 카드**(16:9 포스터 + 아래 정보): 포스터 위 좌상단 광고주 칩, 우하단 영상 길이. 아래에 제목, 날짜 · 작업자, 용량 + 구성 미니 막대.
+  - **호버 0.25초 뒤 음소거 미리보기 재생**(포스터에서 크로스페이드, 커서 가로 위치로 스크럽은 옵션), 떠나면 정지·포스터로.
+  - 클릭 → **프로젝트 시트**(오른쪽에서 밀려 들어오는 넓은 패널): 큰 플레이어(재생 컨트롤 자체 제작 — 네이티브 controls 금지, BannerNode 의 Frosted Pill 재생바 톤), 메타데이터, 영상 목록(썸네일 + 이름 + 날짜, 누르면 플레이어 교체), 폴더 구성 막대, 동작(탐색기에서 열기 · 다른 드라이브로 보관 · 휴지통 · 「이 폴더는 프로젝트가 아님」).
+  - 카드 선택(체크) → 1차의 선택 트레이·이동·휴지통을 그대로 쓴다(프로젝트 폴더 단위 보관이 핵심 시나리오).
+- **광고주 정리** 시트: 감지된 광고주 목록(프로젝트 수·용량), 두 개를 골라 **합치기**(별칭 저장), 이름 바꾸기. 작업자 이니셜 ↔ 이름 편집.
+- 빈 상태: 프로젝트를 못 찾으면 「프로젝트 폴더를 찾지 못했어요 — 프로젝트를 모아 둔 폴더를 지정해 주세요」 + [폴더 지정](project_roots 추가).
+
+### B.5 API
+- `GET /api/projects?drive=*|D&group=client|time|month&q=&worker=&client=&year=&sort=recent|size|name`
+  → `{ok, total, total_bytes, groups:[{key, title, subtitle, bytes, count, cat_bytes, projects:[project…]}], clients:[{name,count,bytes}], workers:[{initial,name,count}], years:[{year, months:[{month, bytes, count}]}]}`
+  `group=time` 은 월 단위 그룹(제목 「2026년 8월」), `group=month` 는 `year` 필터 + 월 그룹, `group=client` 는 광고주 그룹(용량 큰 순).
+- `GET /api/project?key=D:123` → `{ok, project, videos:[<media>…], cat_bytes, children:[폴더 목록 SPEC §7 items 형식]}`
+- `POST /api/projects/not_project {path}` → 설정 `project_excluded` 에 추가.
+- `POST /api/projects/roots {add|remove: path}`.
+- `<media>` = `{path, name, size, mtime, cat, ext, playable:'direct'|'proxy'|'none', poster_url|null, video_url|null, duration?:sec, width?, height?}`
+
+## C. 미디어 서빙과 미리보기 생성 (`core/media.py`)
+
+### C.1 서빙
+- `<video>`/`<img>` 는 헤더를 못 붙이므로 **미디어 토큰** 방식: API 응답을 만들 때 서버가 파일마다 무작위 토큰(`secrets.token_urlsafe(16)`)을 발급해 `{token → 절대경로}` 를 메모리 LRU(1만 개)에 넣고 URL `/media/<token>` 을 돌려준다. URL 에 경로가 없다.
+- `/media/*` 관문: Host 검사 + `Sec-Fetch-Site` 가 있으면 same-origin 만 + 토큰이 표에 있어야 함 + 대상이 영상·이미지 확장자 + 알려진 드라이브 또는 미리보기 캐시 안.
+- **HTTP Range(206) 필수**(시킹·스트리밍). `Content-Type` 은 확장자로. `Cache-Control: private, max-age=3600`. 큰 파일은 1MB 청크로 흘려보낸다(통째로 읽지 않는다).
+
+### C.2 재생 가능성
+- WebView2(Chromium)가 직접 재생: `mp4/m4v/mov` 중 **H.264/AAC**, `webm`(VP8/VP9/AV1). HEVC 는 PC 마다 다르다 → 불확실로 보고 프록시를 만든다.
+- **ProRes·DNxHR·PNG-in-MOV·애니메이션 코덱**(AE 렌더에 흔하다)은 재생 불가 → 프록시.
+- ffprobe 가 있으면 코덱으로 판정(`playable:'direct'|'proxy'`), 없으면 확장자로 추정(`mp4/m4v/webm → direct`, `mov → direct` 후 UI 가 `<video>` error 이벤트를 받으면 `/api/media/proxy` 요청).
+
+### C.3 ffmpeg 로 만드는 것
+- 찾는 순서: 환경변수 `DRIVEBOARD_FFMPEG` → 앱 폴더 `bin\ffmpeg.exe`(배포본 동봉) → PATH.
+- **포스터**: 길이의 10% 지점(최대 3초) 한 프레임, 폭 640, JPEG q=4 → `<data>/previews/<key>.jpg`.
+- **프록시**: 폭 960 이하로 축소, H.264 `-preset veryfast -crf 26 -pix_fmt yuv420p -movflags +faststart`, 오디오 AAC 128k, **최대 90초**(광고 영상은 대부분 이 안). 알파 영상은 검정 배경으로 평탄화.
+- 캐시 키 = `sha1(경로 + 크기 + mtime)` — 파일이 바뀌면 자동으로 새로 만든다(BannerNode 의 교훈: 신원 = 경로+크기+수정시각).
+- 생성은 **별도 미리보기 큐**(스레드 2개, ops 큐와 분리 — 이동이 미리보기에 막히면 안 된다), Windows 에선 `BELOW_NORMAL_PRIORITY_CLASS` + `CREATE_NO_WINDOW`. 화면에 보이는 카드부터(요청 순서 LIFO).
+- 캐시 상한 `settings.preview_cache_gb`(기본 2) — 넘으면 오래 안 쓴 것부터 지운다. 설정에 「미리보기 캐시 비우기」.
+- API: `POST /api/media/poster {path}` / `POST /api/media/proxy {path}` → `{ok, status:'ready'|'queued'|'failed'|'no_ffmpeg', url?}`. UI 는 queued 면 1초 간격으로 다시 묻는다(또는 `/api/state.previews` 의 완료 목록을 본다).
+- ffmpeg 가 없을 때: 직접 재생 가능한 파일은 **브라우저에서 포스터를 만든다**(`<video>` 메타데이터 로드 → 1초로 시킹 → canvas 캡처, 메모리 캐시). 재생 불가 파일은 카테고리 아이콘 포스터 + 「미리보기를 만들 수 없어요」.
+
+## D. 설정 추가
+`workers {}`, `client_aliases {}`, `project_roots []`, `project_excluded []`, `preview_cache_gb 2`, `drive_scan {letter: bool}`, `update_check true`.
+**팀 설정 내보내기/가져오기**: 광고주 별칭·작업자·분류 규칙을 JSON 파일 하나로(경로 규칙은 드라이브 문자가 다를 수 있으니 가져올 때 미리보기로 확인). 팀원이 같은 광고주 목록을 쓰게 하는 용도.
+
+## E. 배포 (GitHub 공개 저장소 `minsk999/driveboard`)
+
+- `driveboard.spec`(PyInstaller onedir, `console=False`, 아이콘, 버전 리소스) → `dist/DriveBoard/DriveBoard.exe`.
+- `.github/workflows/release.yml`: `v*` 태그 → `windows-latest` → Python 3.12 → `pip install pywebview pyinstaller` → ffmpeg 내려받기(**버전 고정 + sha256 검증**, ffmpeg.exe·ffprobe.exe 만 `bin/` 에) → 단위 시험 → PyInstaller → `DriveBoard-Windows.zip` → 릴리스에 첨부(본문 한국어). 태그와 `core/version.py` 버전이 다르면 실패.
+- 저장소에는 코드만. 개인 데이터·실명·사내 경로 금지(작업자 이니셜 기본값은 BRC 원문 그대로 둔다).
+- 서명 없는 exe → 첫 실행 때 SmartScreen 「Windows의 PC 보호」 → [추가 정보] → [실행] 안내를 README 에.
+- ffmpeg 는 GPL 빌드 → `THIRD-PARTY.txt` 에 고지와 소스 링크. Pretendard 는 OFL.
+- **업데이트 알림**: 시작 시 `https://api.github.com/repos/minsk999/driveboard/releases/latest` 를 한 번 조회(5초 타임아웃, 실패는 조용히), 새 버전이면 헤더에 알약 「새 버전 v1.1.0」 → 누르면 릴리스 페이지를 기본 브라우저로. 자동 설치는 하지 않는다. `update_check` 로 끈다.
+- `README.md` 맨 위에 팀원용 3줄 설치법(받기 → 압축 풀기 → DriveBoard.exe).
+
+## F. 복사 (이동과 나란히)
+
+사용자 요청: 이동뿐 아니라 **복사**도. (예: 작업 중인 프로젝트를 NAS·외장에 백업만 해 두기)
+- 이동 알고리즘(SPEC.md §8)에서 **원본 삭제 단계만 빠진 것**이 복사다. 같은 코드 경로(.dbpart → 검증 → os.replace → copystat)를 쓰고 `mode:'copy'|'move'` 로만 갈린다.
+- API: `POST /api/ops/move` 에 `mode:'move'|'copy'`(기본 move) 추가 — 또는 `POST /api/ops/copy` 같은 본문. `preview_move` 도 `mode` 를 받는다.
+- 복사는 **같은 드라이브 안에서도 허용**(이동만 `same_drive` 거부). 같은 드라이브 복사는 원본 옆이 아니라 고른 폴더(dest_dir) 필수 — 같은 상대 경로는 원본 자신이므로.
+- 공간 검사는 같다(필요 바이트 + 1GB). 원본 쪽 여유는 그대로라는 점을 미리보기에서 보여 준다(원본 막대 변화 없음, 대상 막대만 증가).
+- 되돌리기 = **복사본 삭제**(복사한 파일만, 그 작업이 만든 폴더만 — 기존 파일을 덮어쓴 적이 없으므로 안전). 대상이 휴지통 있는 드라이브면 휴지통으로, 아니면 영구 삭제 확인.
+- 인덱스 갱신: 원본은 그대로, 대상만 `scan_subtree` + `graft`.
+- UI:
+  - 선택 트레이: `[휴지통으로] [이동 ▾] [복사 ▾] [선택 해제]` — 이동·복사 팝오버는 같은 드라이브 목록 + 「폴더 선택…」.
+  - 드래그 앤 드롭: 기본 = 이동, **Ctrl 을 누르고 놓으면 복사**(탐색기와 같은 관습). 드래그 칩에 「이동」/「복사 +」 표시가 Ctrl 에 따라 실시간으로 바뀐다.
+  - 우클릭 메뉴에 「다른 위치로 복사…」.
+  - 작업 패널·토스트 문구: 「복사 중 42%」, 「복사했어요 · 412GB → H:」 [열기].
+  - 복사 완료 애니메이션은 이동과 달리 원본 행이 사라지지 않고, 칩만 대상 드라이브로 날아간다(원본 행에 짧은 라임 펄스).
+
+## G. 1.0.0 구현 메모 (이 문서와 달라진 점)
+
+구현하면서 바꾼 곳. 이유는 대부분 **데이터 안전**이나 실측으로 드러난 문제다.
+
+**장치·NAS (A, A.1)**
+- NAS 내부 키는 `N1`·`N2` 가 아니라 `N-` + sha1(소문자로 바꾼 UNC 루트) 앞 6자리(예 `N-3fa9c1`) — 순서가 바뀌어도 같은 공유는 같은 키, 저장된 인덱스와 맞는다.
+- 연결 안 된 장치의 키는 마지막 드라이브 문자. 그 문자를 지금 다른 장치가 쓰면 `~<볼륨 시리얼>`. 회색 항목은 서버가 보호로 돌려주고 UI 는 조작을 내지 않는다.
+  (같은 문자를 새 장치가 쓰는 경우 서버의 작업 API 는 경로만 보므로, 보호 표시를 무시하는 클라이언트는 새 장치의 같은 경로를 건드릴 수 있다 — UI 가 막는다.)
+- NAS 위치를 지우면 그 스캔 기록도 지운다(그러지 않으면 회색 「연결 안 됨」 카드로 되살아난다). 파일은 건드리지 않는다.
+- `/api/scan` 의 `all` = 연결된 드라이브 중 `scan:true` 만. 드라이브를 직접 지정하면 스캔 대상 설정과 상관없이 훑고, 응답에 `skipped` 가 붙는다.
+- 드라이브 목록은 2초 수명 캐시를 뒤에서 새로 고친다(죽은 NAS 가 `/api/state` 폴링을 붙잡지 않게). 작업·설정 변경 직후에는 바로 새로 고친다.
+- 「폴더 선택…」: 창이 없으면(브라우저 모드) `/api/pick_folder` 가 409 `no_dialog` → UI 는 경로 입력 칸을 보인다.
+- 분류의 시스템 문맥(최상위 `Windows`·`Program Files`, `AppData`)도 내장 드라이브에만(`Classifier(internal=…)`). 캐시 규칙은 어디서나 같다.
+- 추천 「오래된 프로젝트를 외장·NAS 로 보관」 카드는 아직 없다. 대신 「오래 손대지 않은 폴더」 추천이 외장·NAS 의 폴더를 대상에서 뺀다.
+
+**프로젝트 (B)**
+- B.2 규칙 3 의 「한 단계 아래 aep」에 **모음 폴더 예외**: aep 가 든 하위 폴더가 날짜 이름(그 자체로 프로젝트)이거나, 도구 폴더(`AE`·`PR`·`aep`·`프로젝트`…)가 아닌 하위 폴더 둘 이상에 흩어져 있으면 부모는 프로젝트가 아니다.
+  그대로 두면 `D:\Projects\260803_x\260803_x.aep` 같은 흔한 구조에서 `Projects` 하나가 안의 프로젝트를 전부 삼킨다(종단 시험에서 실제로 드러남).
+- 목록 응답의 `<media>` 는 이미 캐시된 ffprobe 결과만 쓰고 없으면 확장자로 추정한다(C.2 허용). 상세(`/api/project`)는 2초 안에 영상 8개까지만 ffprobe, NAS 에서는 하지 않는다.
+- 프로젝트 레코드에 `connected`·`drive_label`·`drive_kind` 가 더 붙는다. 연결 안 된 장치의 프로젝트는 `connected:false`, 미디어 URL 없음.
+- 화면: 광고주별 보기에서는 포스터의 광고주 칩을 숨긴다(섹션 제목이 이미 광고주). 「최근 3개월·1년」 기간 필터는 브라우저에서 거른다(API 에 날짜 범위 인자가 없음).
+  호버 스크럽은 가로로 18px 넘게 움직이면 시작한다. 움직임 줄이기 설정에서는 호버 자동 재생 없이 스크럽만.
+- 시트 정보의 「영상 N개」는 인덱스 수와 상세 목록 길이 중 큰 값(작은 영상은 인덱스가 모른다).
+
+**미디어 (C)**
+- `/media` 관문은 C.1 보다 엄격하다: 링크·클라우드 자리표시자·일반 파일이 아닌 것·실경로가 드라이브 루트/미리보기 폴더 밖으로 나가는 것을 거부하고, `Sec-Fetch-Site: none` 도 거부한다. HTML 의 CSP 에 `media-src 'self' blob:` 추가.
+- `/api/media/poster`·`proxy` 응답에 알면 `playable`·`duration`·`width`·`height` 를 붙인다. `/api/state.previews` 가 최근 완료 목록·캐시 크기를 알려 준다.
+
+**설정·배포 (D, E)**
+- 업데이트 확인은 시작할 때 한 번(설정을 다시 켜면 한 번 더). 끄면 알약이 바로 사라진다. 앱이 여는 주소는 `https://github.com/minsk999/driveboard` 아래만.
+- 한 번만 실행: 데이터 폴더의 `instance.json`(포트 + 비밀값). 두 번째 실행은 첫 실행을 앞으로 부르고 끝난다. `--no-open`·`--multi` 는 검사하지 않는다.
+- 팀 설정 내보내기는 파일 다운로드(Blob) — 창 모드에서는 pywebview `ALLOW_DOWNLOADS` 를 켠다.
+- 설정 화면: 스위치·목록 동작은 바로 적용, 입력 칸은 [저장] 을 눌러야 적용.
+
+**복사·삭제 (F, A.1)**
+- `POST /api/ops/copy` 는 `mode:'copy'` 인 `/api/ops/move` 의 별칭. 영구 삭제는 `POST /api/ops/delete {paths, confirm:true}`.
+- **복사 되돌리기는 원본이 제자리에 그대로 있을 때만** 복사본을 지운다. 복사한 뒤 원본을 다른 곳으로 옮겼다면 원본 자리가 비어 「복사본이 유일본」으로 보고 거절한다 — 이동을 먼저 되돌리면 된다.
+- 휴지통 없는 위치가 섞인 선택을 「휴지통으로」 보내면 휴지통 있는 항목만 보내고 나머지는 남긴다(영구 삭제로 넘기지 않는다). 전부 휴지통이 없을 때만 빨간 삭제 시트.
+- Ctrl 을 누르고 같은 드라이브에 놓으면 거부하지 않고 「폴더를 골라 복사」로 이어진다. 복사 중에는 원본 행을 잠그지 않는다(이동만 잠금).

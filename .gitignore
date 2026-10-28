@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+_shots/
+dist/
+/build/*
+!/build/icon.ico
+*.log
+bin/
