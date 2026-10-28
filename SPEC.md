@@ -66,7 +66,7 @@ driveboard/
 | 9 | app     | 앱·시스템      | `#8E8E93` | **false** | Windows·Program Files·실행 파일 |
 | 10| other   | 기타           | `#5C5C63` | true  | 나머지 |
 
-가상 세그먼트(카테고리 아님, UI 막대에만): `bin` 휴지통(`#FF453A`), `unscanned` 「시스템·확인 불가」(사용량 − 스캔 합계 − 휴지통, `#3A3A40` + 사선 해치), `free` 남은 공간(트랙색).
+가상 세그먼트(카테고리 아님, UI 막대에만): `bin` 휴지통(`#FF453A`), `unscanned` 「시스템·확인 불가」(**스캔한** 드라이브의 사용량 − 스캔 합계 − 휴지통, `#3A3A40` + 사선 해치), `ns` 「아직 스캔 안 함」(스캔한 적 없는 드라이브의 사용량 − 휴지통, 옅은 사선 — 화면만의 키, SPEC-2 H), `free` 남은 공간(트랙색).
 
 ### 3.1 디렉터리 문맥(context)
 디렉터리마다 `ctx`(카테고리 id 또는 None)를 부모에게서 물려받고, 자기 이름으로 덮어쓴다. 비교는 **소문자·앞뒤 공백 제거**.
@@ -209,6 +209,8 @@ class DriveIndex:
  busy:bool}
 ```
 `unscanned_bytes = max(0, used - scanned_bytes - bin_bytes)`. 스캔 전이면 `cats` 는 0 배열, `unscanned_bytes = used - bin_bytes`.
+화면은 스캔 전(그리고 스캔 중이 아닌) 드라이브의 이 값을 「시스템·확인 불가」가 아니라 `ns` 「아직 스캔 안 함」으로 그린다.
+`also_as:[키…]` = 같은 공유가 다른 키(문자 ↔ 「NAS 추가」 위치)로도 잡혀 이 항목 하나로 합친 것.
 
 ### POST /api/scan  `{drives:['D','E'] | 'all'}` → `{ok, started:['D','E']}`
 ### POST /api/scan/cancel `{drive:'D'}`
@@ -238,8 +240,11 @@ class DriveIndex:
 → `{ok, job_id}` / 400 `{error:'space', need, free}` / 400 `protected` / 400 `same_drive`
 ### POST /api/ops/preview_move `{paths, target, dest_dir?}`
 → `{ok, bytes, files, target_free, target_free_after, enough:bool, blocked:[…], dest_examples:['H:\\Projects\\A', …(최대 3)], conflicts:n}`
-### POST /api/ops/empty_bin `{drives:['D']}` → `{ok, job_id}`
-### POST /api/ops/cancel `{job_id}` · POST /api/ops/undo `{job_id}` → `{ok, job_id(새 작업)}`
+### POST /api/ops/empty_bin `{drives:['D'], confirm:true}` → `{ok, job_id}` / `confirm` 없으면 400 `need_confirm`
+### POST /api/ops/delete `{paths, confirm:true, expect?:[{path,bytes,files}]}` → `{ok, job_id}` / 400 `need_confirm` / 409 `changed` `{paths, grown}`(확인한 양보다 늘었다)
+### POST /api/ops/cancel `{job_id}` · POST /api/ops/undo `{job_id, confirm?}` → `{ok, job_id(새 작업)}`
+되돌리기 거절: 400 `drive_changed`(그 문자에 작업 때와 다른 디스크 — 볼륨 일련번호 대조), 400 `need_confirm` `{permanent:true}`(휴지통 없는 곳의 복사본을 영구 삭제하게 되는데 `confirm:true` 가 없다).
+### POST /api/app/close → `{ok, deleting}` 진행 중 작업을 멈추고(원본 삭제 단계는 마저 끝낸 뒤) 창을 닫는다 / 창이 없으면 400 `no_window`
 ### GET /api/jobs → `{ok, jobs:[…최근 200]}`
 job:
 ```
@@ -283,9 +288,16 @@ job:
 6. 취소: 진행 중 파일의 `.dbpart` 삭제, 이미 끝난 항목은 이동된 채로 두고 결과에 기록.
 7. 실패한 `.dbpart` 는 반드시 정리(finally).
 8. 되돌리기: 완료된 항목만, 대상 → 원래 경로로 같은 알고리즘으로 이동(원래 경로가 다시 생겼으면 ` (2)`).
+   작업 때 기록한 대상·원본 드라이브의 볼륨 일련번호가 지금 그 문자의 것과 다르면 거절(`drive_changed`) — 요청 때와 실행 때 두 번 본다.
+   원 작업은 되돌릴 수 있는 채로 남는다.
 9. 실행 중인 Adobe 앱(AfterFX.exe, Adobe Premiere Pro.exe, Adobe Media Encoder.exe)이 있으면 캐시 카테고리 항목 작업 전에 경고 문구를 결과 message 에 담는다(차단은 안 함). 프로세스 목록은 `tasklist /FO CSV /NH`(CREATE_NO_WINDOW).
+10. 중단(크래시·창 닫기) 뒤 기록: 원본 삭제 직전·직후에 항목 상태를 저장하고, 다음 실행 때 그 상태로 문구를 만든다
+   (끝난 항목 = 옮김, 삭제 중 끊긴 항목 = 「원본과 대상에 나뉘어 있을 수 있어요」, 아무것도 안 지웠을 때만 「원본은 지워지지 않았어요」).
+   앱 종료는 진행 중인 원본 삭제 단계를 끝까지(최대 120초) 기다린다. 창을 닫을 때 파일 작업이 남아 있으면 화면이 먼저 묻는다.
 
-**휴지통 비우기(empty_bin)**: `SHEmptyRecycleBinW(None, "D:\\", SHERB_NOCONFIRMATION|SHERB_NOPROGRESSUI|SHERB_NOSOUND)`. UI 에서 확인창 필수(영구 삭제). 크기는 `SHQueryRecycleBinW`.
+**휴지통 비우기(empty_bin)**: `SHEmptyRecycleBinW(None, "D:\\", SHERB_NOCONFIRMATION|SHERB_NOPROGRESSUI|SHERB_NOSOUND)`. UI 에서 확인창 필수(영구 삭제), 서버도 `confirm:true` 를 요구. 크기는 `SHQueryRecycleBinW`.
+
+**휴지통 유무**: 고정(`DRIVE_FIXED`) NTFS·ReFS = 있음, 고정 FAT/exFAT = `$RECYCLE.BIN` 폴더가 있을 때만, **이동식(`DRIVE_REMOVABLE`) = 폴더가 남아 있어도 없음**, 네트워크 = 없음.
 
 ## 9. 보호 경로 (core/safety.py) `check(path, drives) -> (ok, reason)`
 
@@ -298,6 +310,7 @@ job:
 - `Users\<이름>\` 바로 아래 표준 폴더 자체(`Desktop`, `Documents`, `Downloads`, `Pictures`, `Videos`, `Music`, `OneDrive`) — 안의 내용물은 허용.
 - 카테고리 app(9) 으로 분류된 항목.
 - 앱 자신의 폴더와 데이터 폴더(`DRIVEBOARD_HOME`).
+- **이 PC 자신을 가리키는 공유**(`\\localhost\…`·`\\127.0.0.1\…`·`\\::1`·`*.localhost`·이 PC 이름, `\\?\UNC\` 형 포함) 아래 전부 — 외장 규칙이 걸려 `C:\Windows` 가 열리지 않게. 등록(「NAS 추가」)도 400 `local_share`.
 fake 백엔드에서도 같은 규칙을 fake 루트 기준으로 적용한다.
 
 ## 10. 추천 (core/recommend.py) `build(indexes, drives, settings, dupes) -> list[rec]`

@@ -236,6 +236,18 @@ class TestRecommend(Tmp):
             self.assertNotIn("백업", op["desc"])
             self.assertNotIn("N-aaaaaa", op["desc"])
 
+    def test_old_folders_target_must_have_room(self):
+        # H(HDD)가 꽉 찼으면 HDD 라도 권하지 않는다 — 같은 화면의 「공간 부족」 카드와 반대말이 된다
+        TB = 4000787030016
+        full = [dict(self.state[0], free=3 * TB // 4), dict(self.state[1], free=5 * GB)]
+        op = {r["id"]: r for r in recommend.build(self.idxs, full, {}, self.groups, NOW)}["old_project"]
+        self.assertNotIn("HDD1 (H:)", op["desc"])
+        self.assertNotIn("남음", op["desc"])                  # D 는 원본이라 대상이 아니고, 다른 곳도 없다
+        # 넉넉한 다른 드라이브가 있으면 그쪽(HDD 가 아니어도)
+        st = full + [{"letter": "E", "label": "SSD2", "kind": "ssd", "total": 2 * TB, "free": TB}]
+        op = {r["id"]: r for r in recommend.build(self.idxs, st, {}, self.groups, NOW)}["old_project"]
+        self.assertIn("SSD2 (E:)", op["desc"])
+
     def test_old_days_setting(self):
         recs = recommend.build(self.idxs, self.state, {"old_days": 730}, self.groups, NOW)
         self.assertNotIn("old_render", [r["id"] for r in recs])

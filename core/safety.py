@@ -17,6 +17,7 @@ import ntpath
 import os
 import posixpath
 import re
+import socket
 
 IS_WIN = os.name == "nt"
 APP_CAT = 9
@@ -71,6 +72,8 @@ R_FAKEMETA = "가짜 드라이브 관리 파일이라 보호돼요."
 R_APPCAT = "앱·시스템 항목이라 보호돼요."
 R_SELF = "DriveBoard 가 쓰는 폴더라 보호돼요."
 R_SELF_PARENT = "DriveBoard 가 쓰는 폴더가 안에 있어 보호돼요."
+R_LOCAL_SHARE = ("이 PC 자신의 공유 폴더(\\\\localhost·\\\\PC이름 등)라 다루지 않아요 — 시스템 폴더 보호가 적용되지 않는 "
+                 "경로예요. 드라이브 문자(C: 등)로 다뤄 주세요.")
 
 _extra_raw: list = []
 
@@ -222,6 +225,60 @@ def _match(mod, drive, comps, drives, flavor):
     return best
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "::1", "[::1]", "0:0:0:0:0:0:0:1", "0--1.ipv6-literal.net",
+                             "0.0.0.0", "."})
+
+
+_local_names_cache: list = []
+
+
+def _local_hostnames():
+    if _local_names_cache:
+        return _local_names_cache[0]
+    names = set()
+    for n in (os.environ.get("COMPUTERNAME"), _safe_hostname()):
+        if n:
+            n = n.casefold().rstrip(".")
+            names.add(n)
+            names.add(n.split(".", 1)[0])
+    names.discard("")
+    _local_names_cache.append(frozenset(names))
+    return _local_names_cache[0]
+
+
+def _safe_hostname():
+    try:
+        return socket.gethostname()
+    except Exception:
+        return ""
+
+
+def unc_host(p):
+    """'\\\\host\\share…' 의 host(소문자), UNC 가 아니면 ''."""
+    if not isinstance(p, str):
+        return ""
+    q = p.replace("/", "\\")
+    if q[:4] in ("\\\\?\\", "\\\\.\\"):
+        q = q[4:]
+        if q[:4].upper() == "UNC\\":
+            q = "\\\\" + q[4:]
+        else:
+            return ""
+    if not q.startswith("\\\\"):
+        return ""
+    return q[2:].split("\\", 1)[0].casefold().rstrip(".")
+
+
+def is_local_unc(p):
+    """UNC 가 이 PC 자신을 가리키는가(루프백·127.x·이 PC 이름). 그 아래는 C:\\Windows 와 같은 곳일 수 있다."""
+    h = unc_host(p)
+    if not h:
+        return False
+    if h in _LOOPBACK_HOSTS or h.startswith("127.") or h.endswith(".localhost"):
+        return True
+    return h in _local_hostnames() or h.split(".", 1)[0] in _local_hostnames()
+
+
 def is_external(d):
     """외장·USB·네트워크 위치인가(시스템 폴더 규칙을 적용하지 않는 곳). 문자열 루트는 내장으로 본다."""
     if not isinstance(d, dict):
@@ -329,6 +386,8 @@ def check(path, drives, flavor=None, cat=None):
     if hit is None:
         return False, R_UNKNOWN
     d, rcomps = hit
+    if isinstance(d, dict) and (is_local_unc(d.get("unc")) or is_local_unc(d.get("root"))) or is_local_unc(path):
+        return False, R_LOCAL_SHARE         # 루프백·자기 PC 공유: 외장 규칙(루트만 보호)이 적용되면 안 된다
     rel = comps[len(rcomps):]
     is_fake = mod is posixpath or (len(rcomps) > 0 and not drive.startswith("\\\\"))
     reason = _rule_reason(_fold(rel), is_fake, is_external(d))

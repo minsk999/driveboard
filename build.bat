@@ -17,7 +17,6 @@ set "PYWEBVIEW_VERSION=5.4"
 set "PYINSTALLER_VERSION=6.16.0"
 set "PYTHONUTF8=1"
 set "DRIVEBOARD_NO_UPDATE_CHECK=1"
-set "DRIVEBOARD_REQUIRE_FFMPEG=1"
 
 set "USE_VENV="
 set "SKIP_TESTS="
@@ -74,6 +73,9 @@ if defined SKIP_TESTS (
 )
 
 echo   [5/6] PyInstaller
+rem ffmpeg is required only for the PyInstaller step. Setting it before :run_tests leaks into the
+rem spec tests (temp tree without bin\) and makes them fail with SystemExit.
+set "DRIVEBOARD_REQUIRE_FFMPEG=1"
 if exist "dist\DriveBoard" rmdir /s /q "dist\DriveBoard"
 if exist "dist\DriveBoard" (
   echo   [X] dist\DriveBoard 를 지우지 못했어요. DriveBoard.exe 가 실행 중이면 트레이까지 종료해 주세요.
@@ -102,6 +104,7 @@ exit /b 0
 
 :run_tests
 setlocal
+set "DRIVEBOARD_REQUIRE_FFMPEG="
 set "DRIVEBOARD_HOME=%TEMP%\driveboard-build-tests-%RANDOM%"
 %PY% -m unittest discover -s tests
 set "RC=%ERRORLEVEL%"

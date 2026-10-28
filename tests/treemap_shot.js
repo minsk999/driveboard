@@ -93,9 +93,13 @@ async function run() {
     if (hp) {
       await page.mouse.move(hp.x + 1, hp.y + 1);
       await frames(page, 3);
-      const tip = await page.$eval('.tm-tip', el => ({ show: el.classList.contains('show'), name: el.querySelector('.tn').textContent, bar: el.querySelectorAll('.tb i').length }));
+      const tip = await page.$eval('.tm-tip', el => ({ show: el.classList.contains('show'), name: el.querySelector('.tn').textContent, bar: el.querySelectorAll('.tb i').length, parts: [...el.querySelectorAll('.td span')].map(s => s.textContent) }));
       check(tip.show && tip.name.length > 0, '툴팁 표시: ' + tip.name);
       check(tip.bar >= 1, '툴팁 구성 막대 ' + tip.bar + '칸');
+      // 구성 줄에 카테고리 이름이 붙는다(색 점만으로는 못 읽는다) · 다른 몫이 있으면 맨 위가 100% 가 아니다
+      const names = ['캐시·임시', '렌더·출력', '촬영·소스', '프록시', '기타 영상', '프로젝트', '이미지·시퀀스', '오디오', '압축·백업', '앱·시스템', '기타'];
+      check(tip.parts.length >= 1 && tip.parts.every(t => names.some(n => t.startsWith(n + ' '))), '툴팁 구성에 카테고리 이름: ' + tip.parts.join(' | '));
+      check(!(tip.parts.length > 1 && / 100%$/.test(tip.parts[0])), '다른 몫이 있으면 맨 위가 100% 로 보이지 않음');
       await page.waitForTimeout(160);
       await shot(page, 'hover');
     }

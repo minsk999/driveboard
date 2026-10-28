@@ -269,7 +269,7 @@ class SafetyVectors(unittest.TestCase):
     def test_fake_vectors(self):
         for path, ok, reason in FAKE_VECTORS:
             with self.subTest(path=path):
-                got_ok, got_reason = safety.check(path, FAKE_DRIVES)
+                got_ok, got_reason = safety.check(path, FAKE_DRIVES, flavor="posix")
                 self.assertEqual(got_ok, ok, "%r → %r" % (path, got_reason))
                 if reason is not None:
                     self.assertEqual(got_reason, reason, path)
@@ -282,7 +282,7 @@ class SafetyVectors(unittest.TestCase):
                 self.assertEqual(got_reason, reason or "", path)
         for path, ok, reason in FAKE_EXT_VECTORS:
             with self.subTest(path=path):
-                got_ok, got_reason = safety.check(path, FAKE_EXT_DRIVES)
+                got_ok, got_reason = safety.check(path, FAKE_EXT_DRIVES, flavor="posix")
                 self.assertEqual(got_ok, ok, "%r → %r" % (path, got_reason))
                 self.assertEqual(got_reason, reason or "", path)
 
@@ -305,6 +305,25 @@ class SafetyVectors(unittest.TestCase):
         self.assertFalse(safety.is_external("E:\\"))
         # 키만 있고 루트가 없는 네트워크 dict 는 'N:' 로 추측하지 않는다
         self.assertEqual(safety.check("N:\\x", [{"letter": "N-3fa9c1"}], flavor="nt"), (False, safety.R_UNKNOWN))
+
+    def test_loopback_and_own_pc_shares_are_refused(self):
+        """\\\\localhost\\C$ 같은 자기 PC 공유는 외장 규칙(루트만 보호)이 적용돼 Windows 폴더가 열린다 → 전부 거부."""
+        me = (safety._safe_hostname() or "ThisPC").split(".", 1)[0]
+        locs = [{"letter": "N-1", "root": "\\\\localhost\\C$\\", "kind": "network", "unc": "\\\\localhost\\C$"},
+                {"letter": "N-2", "root": "\\\\127.0.0.1\\c$\\", "kind": "network", "unc": "\\\\127.0.0.1\\c$"},
+                {"letter": "N-3", "root": "\\\\%s\\Users\\" % me, "kind": "network", "unc": "\\\\%s\\Users" % me},
+                {"letter": "Z", "root": "Z:\\", "kind": "network", "unc": "\\\\LOCALHOST\\D$"}]
+        for path in ("\\\\localhost\\C$\\Windows\\System32", "\\\\localhost\\C$\\proj\\a.mov",
+                     "//127.0.0.1/c$/Users/me/AppData", "\\\\%s\\Users\\me\\AppData" % me, "Z:\\proj\\a.mov",
+                     "\\\\?\\UNC\\localhost\\C$\\Windows"):
+            with self.subTest(path=path):
+                self.assertEqual(safety.check(path, locs, flavor="nt"), (False, safety.R_LOCAL_SHARE))
+        self.assertTrue(safety.is_local_unc("\\\\[::1]\\c$"))
+        self.assertFalse(safety.is_local_unc("\\\\ORICO\\영상백업"))
+        self.assertFalse(safety.is_local_unc("C:\\Windows"))
+        self.assertFalse(safety.is_local_unc(None))
+        # 진짜 NAS 는 그대로(숨김 공유 이름 '$' 도 NAS 에선 정상)
+        self.assertEqual(safety.check("\\\\ORICO\\영상백업\\A\\b.mov", EXT_DRIVES, flavor="nt"), (True, ""))
 
     def test_extra_protected_applies_on_external(self):
         safety.set_extra_protected(["E:\\Tools\\DriveBoard"])
@@ -349,10 +368,17 @@ class SafetyVectors(unittest.TestCase):
         self.assertTrue(safety.check("H:\\Tools\\DriveBoard", NT_DRIVES, flavor="nt")[0])
 
     def test_builtin_data_home(self):
+        if safety.IS_WIN:
+            # Windows: os.path.abspath 가 드라이브 문자를 붙인다 → 같은 규칙을 NT 경로로 본다
+            os.environ["DRIVEBOARD_HOME"] = "D:\\dbhome"
+            self.assertEqual(safety.check("D:\\dbhome\\jobs.json", NT_DRIVES, flavor="nt"), (False, safety.R_SELF))
+            self.assertEqual(safety.check("D:\\dbhome", NT_DRIVES, flavor="nt"), (False, safety.R_SELF))
+            self.assertTrue(safety.check("D:\\dbhome2", NT_DRIVES, flavor="nt")[0])
+            return
         os.environ["DRIVEBOARD_HOME"] = "/fake/D/dbhome"
-        self.assertEqual(safety.check("/fake/D/dbhome/jobs.json", FAKE_DRIVES), (False, safety.R_SELF))
-        self.assertEqual(safety.check("/fake/D/dbhome", FAKE_DRIVES), (False, safety.R_SELF))
-        self.assertTrue(safety.check("/fake/D/dbhome2", FAKE_DRIVES)[0])
+        self.assertEqual(safety.check("/fake/D/dbhome/jobs.json", FAKE_DRIVES, flavor="posix"), (False, safety.R_SELF))
+        self.assertEqual(safety.check("/fake/D/dbhome", FAKE_DRIVES, flavor="posix"), (False, safety.R_SELF))
+        self.assertTrue(safety.check("/fake/D/dbhome2", FAKE_DRIVES, flavor="posix")[0])
 
     def test_builtin_app_dir(self):
         app = os.path.dirname(os.path.dirname(os.path.abspath(safety.__file__)))
@@ -368,16 +394,16 @@ class SafetyVectors(unittest.TestCase):
         self.assertEqual(d["letter"], "D")
         self.assertEqual(rel, ["Projects", "A", "b.mp4"])
         self.assertIsNone(safety.drive_of("Z:\\x", NT_DRIVES, flavor="nt"))
-        d, rel = safety.drive_of("/fake/d/Proj/x", FAKE_DRIVES)
+        d, rel = safety.drive_of("/fake/d/Proj/x", FAKE_DRIVES, flavor="posix")
         self.assertEqual((d["letter"], rel), ("D", ["Proj", "x"]))
         self.assertEqual(safety.normalize("d:/a//b/./c", flavor="nt"), "D:\\a\\b\\c")
-        self.assertEqual(safety.normalize("/a//b/./c/"), "/a/b/c")
-        self.assertIsNone(safety.normalize("a/../b"))
-        self.assertIsNone(safety.normalize("relative"))
+        self.assertEqual(safety.normalize("/a//b/./c/", flavor="posix"), "/a/b/c")
+        self.assertIsNone(safety.normalize("a/../b", flavor="posix"))
+        self.assertIsNone(safety.normalize("relative", flavor="posix"))
 
     def test_longest_root_wins(self):
         drives = [{"letter": "C", "root": "/x"}, {"letter": "D", "root": "/x/D"}]
-        d, rel = safety.drive_of("/x/D/a", drives)
+        d, rel = safety.drive_of("/x/D/a", drives, flavor="posix")
         self.assertEqual(d["letter"], "D")
         self.assertEqual(rel, ["a"])
 

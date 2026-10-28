@@ -337,6 +337,8 @@ class T1Flow(unittest.TestCase):
             self.assertIsNone(model.find_dir(idx, p))
         # 휴지통 비우기 → 공간 확보
         s, d = req("POST", "/api/ops/empty_bin", {"drives": ["D"]})
+        self.assertEqual((s, d["error"]), (400, "need_confirm"))      # 영구 삭제 — 확인 없이는 안 한다
+        s, d = req("POST", "/api/ops/empty_bin", {"drives": ["D"], "confirm": True})
         self.assertEqual(s, 200)
         j = wait_job(d["job_id"])
         self.assertEqual(j["status"], "done", j)

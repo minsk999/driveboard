@@ -27,7 +27,6 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
       DRIVEBOARD_NO_UPDATE_CHECK: '1'
-      DRIVEBOARD_REQUIRE_FFMPEG: '1'
       FFMPEG_VERSION: '8.0.1'
       FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip
       FFMPEG_SHA256: e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673
@@ -91,6 +90,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "단위 시험 실패" }
 
       - name: Build with PyInstaller
+        # ffmpeg 필수는 이 단계에만 건다 — 잡 전체에 걸면 'Unit tests' 의 spec 시험(bin/ 없는 임시 트리)이
+        # 그 값을 물려받아 SystemExit 로 깨지고, 태그를 밀어도 릴리스가 나오지 않는다.
+        env:
+          DRIVEBOARD_REQUIRE_FFMPEG: '1'
         run: |
           python -m PyInstaller --noconfirm --clean --workpath build\pyi --distpath dist driveboard.spec
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller 실패" }
@@ -102,6 +105,15 @@ jobs:
                            'dist\DriveBoard\_internal\bin\FFmpeg-LICENSE.txt')) {
             if (-not (Test-Path $p)) { throw "배포본에 빠진 파일: $p" }
           }
+          # 네이티브 창(pywebview → pythonnet → WebView2)에 필요한 DLL. --no-open 스모크 시험은 webview 를
+          # 임포트하지 않아 이게 빠져도 통과한다 — 그래서 여기서 이름으로 확인한다(위치는 훅마다 달라 재귀 검색).
+          foreach ($n in @('Python.Runtime.dll', 'ClrLoader.dll',
+                           'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll',
+                           'WebView2Loader.dll')) {
+            $hit = Get-ChildItem -Path dist\DriveBoard\_internal -Recurse -File -Filter $n -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $hit) { throw "배포본에 네이티브 창 DLL 이 빠졌습니다: $n" }
+            Write-Host "native dll: $($hit.FullName.Substring((Resolve-Path dist\DriveBoard).Path.Length + 1))"
+          }
           Copy-Item THIRD-PARTY.txt dist\DriveBoard\THIRD-PARTY.txt
           $info = (Get-Item dist\DriveBoard\DriveBoard.exe).VersionInfo
           Write-Host "exe ProductVersion: $($info.ProductVersion)"
@@ -112,6 +124,12 @@ jobs:
           $fake = Join-Path $env:RUNNER_TEMP 'db-fake-empty'
           New-Item -ItemType Directory -Force -Path $fake | Out-Null
           $env:DRIVEBOARD_HOME = Join-Path $env:RUNNER_TEMP 'db-home-smoke'
+          # 1) 창 스택 자가 진단 — --no-open 은 webview 를 안 불러 DLL 이 있어도 로드 실패를 못 잡는다.
+          #    console=False 라 출력이 없다: 종료 코드와 selftest-gui.log 로 본다.
+          $g = Start-Process -FilePath dist\DriveBoard\DriveBoard.exe -ArgumentList @('--selftest-gui') -Wait -PassThru
+          Get-Content (Join-Path $env:DRIVEBOARD_HOME 'selftest-gui.log') -ErrorAction SilentlyContinue
+          if ($g.ExitCode -ne 0) { throw "배포본의 창 스택(pywebview·pythonnet·WebView2)이 올라오지 않습니다 (exit $($g.ExitCode))" }
+          # 2) 서버가 UI 를 내보내는지
           $port = 18790
           $p = Start-Process -FilePath dist\DriveBoard\DriveBoard.exe -ArgumentList @('--no-open', '--port', "$port", '--fake', $fake) -PassThru
           $ok = $false

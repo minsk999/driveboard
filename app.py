@@ -136,6 +136,31 @@ def _connected(d):
     return isinstance(d, dict) and d.get("connected") is not False
 
 
+def _one_per_share(drives):
+    """같은 네트워크 공유(UNC)가 문자(Z:)로도 매핑되고 「NAS 추가」로도 등록돼 있으면 하나만 남긴다.
+
+    둘은 시리얼(_unc_serial)이 같아 저장 인덱스 하나를 같이 쓰게 된다 → 같은 파일이 두 드라이브에 보이고
+    (자기 자신이 「중복」이 된다) 합계가 두 번 더해진다. 연결된 쪽 → 문자 드라이브 순으로 하나를 고른다.
+    (winapi 가 다는 same_as 도 같은 경우다.) 지역 드라이브는 건드리지 않는다.
+    """
+    by = {}
+    for i, d in enumerate(drives):
+        u = d.get("unc") if d.get("kind") == "network" else None
+        if isinstance(u, str) and u:
+            by.setdefault(os.path.normcase(u.rstrip("\\/")).lower(), []).append(i)
+    drop = set()
+    for idxs in by.values():
+        if len(idxs) < 2:
+            continue
+        keep = min(idxs, key=lambda i: (not _connected(drives[i]), len(_letter(drives[i])) != 1, i))
+        for i in idxs:
+            if i != keep:
+                drop.add(i)
+        also = [_letter(drives[i]) for i in idxs if i != keep]
+        drives[keep] = dict(drives[keep], also_as=also)
+    return [d for i, d in enumerate(drives) if i not in drop]
+
+
 def _unsafe_file(path):
     """링크·클라우드 자리표시자·일반 파일 아님 → True (서빙·미리보기 생성 안 함 — 읽기만 해도 다운로드가 시작된다)."""
     try:
@@ -168,6 +193,8 @@ def allowed_open_url(u):
     if p.scheme != "https" or p.netloc != "github.com" or p.username or p.password:
         return False
     path = p.path
+    if "%" in path or any(seg in (".", "..") for seg in path.split("/")):
+        return False                      # /minsk999/driveboard/../../다른/저장소 — 브라우저가 정규화하면 범위를 벗어난다
     return path == OPEN_URL_PREFIX or path.startswith(OPEN_URL_PREFIX + "/")
 
 
@@ -192,7 +219,8 @@ class App:
         self._offline = {}                      # 화면 키 -> 연결 안 된 장치의 가짜 드라이브 dict
         self._disp_sk = {}                      # 화면 키 -> 저장 키
         self.scans = {}                         # key -> progress dict (+ _ended)
-        self.verified = {}                      # dupe group id -> True/False/None
+        self._scan_dirty = {}                   # 화면 키 -> {경로 키: 경로} 전체 스캔 동안 작업이 바꾼 것(_hook_refresh → _scan_watch)
+        self.verified = {}                      # dupe group id -> {res: True/False/None, fp: 그때 읽은 파일들의 지문}
         self.settings = settings_mod.load()
         self._sgen = 0                          # 프로젝트에 영향을 주는 설정이 바뀔 때마다 +1
         self._pcache = {}                       # 화면 키 -> (sig, records)
@@ -207,6 +235,7 @@ class App:
         self._meta = self._load_meta()
         self._meta_dirty = False
         self.window = None                      # pywebview 창(있으면)
+        self._close_ok = False                  # 창 닫기를 이미 허락했다(파일 작업 중 확인을 거쳤거나 강제)
         self.open_url_fn = webbrowser.open
         self.checker = None
         ff, fp = media.find_ffmpeg(app_dir=paths.ffmpeg_app_dir())
@@ -244,8 +273,8 @@ class App:
     # ── 드라이브 ──
     def _list_raw(self):
         s = self.settings
-        return winapi.list_drives(network_locations=s.get("network_locations") or [],
-                                  drive_scan=s.get("drive_scan") or {})
+        return _one_per_share(winapi.list_drives(network_locations=s.get("network_locations") or [],
+                                                 drive_scan=s.get("drive_scan") or {}))
 
     def _set_drives(self, lst):
         """_dlock 을 쥔 채로 부른다."""
@@ -453,6 +482,8 @@ class App:
             L, sk = _letter(d), self._key(d)
             if not L or not sk:
                 continue
+            if sk in used:
+                continue                          # 한 인덱스를 두 화면 키에 주지 않는다(시리얼이 같은 두 장치)
             idx = self._get_idx(sk)
             if idx is None:
                 continue
@@ -552,8 +583,10 @@ class App:
         d = self.drive_for_path(path)
         if d is None:
             return
+        L = _letter(d)
         with self.lock:
-            idx = self.indexes.get(_letter(d))
+            self._note_dirty(L, path)
+            idx = self.indexes.get(L)
             if idx is None:
                 return
             scanner.refresh(idx, path, d, self.settings)
@@ -592,6 +625,68 @@ class App:
                     out.append(p)
         return out
 
+    @staticmethod
+    def _disk_totals(path):
+        """(바이트, 파일 수) — 영구 삭제가 실제로 지울 것(ops 와 같은 걷기: 링크는 따라가지 않는다). 못 읽으면 None."""
+        try:
+            st = os.lstat(winapi.long_path(path))
+        except OSError:
+            return None
+        if stat_mod.S_ISDIR(st.st_mode):
+            files, _dirs, _skipped = ops._scan_tree(path, safety.mod_for(path))
+            return sum(z for _p, z in files), len(files)
+        if stat_mod.S_ISREG(st.st_mode):
+            return st.st_size, 1
+        return None
+
+    def check_growth(self, items, expect=None):
+        """영구 삭제 직전 — 확인창이 보여 준 양보다 디스크에 더 있으면 시작하지 않는다(시퀀스의 「프레임이 늘었어요」와 같은 규칙).
+
+        확인창의 숫자는 inspect() = 스캔 인덱스다. 스캔 뒤 동료가 넣은 파일까지 「N개 항목(작은 크기)」 동의로
+        지우면 안 된다. expect: UI 가 확인창에 보여 준 [{path, bytes, files}] (없으면 인덱스 값으로 본다).
+        """
+        exp = {}
+        if isinstance(expect, list):
+            for e in expect[:5000]:
+                if not isinstance(e, dict) or not isinstance(e.get("path"), str):
+                    continue
+                b, n = e.get("bytes"), e.get("files")
+                if (isinstance(b, int) and not isinstance(b, bool) and b >= 0
+                        and isinstance(n, int) and not isinstance(n, bool) and n >= 0):
+                    exp[os.path.normcase(os.path.normpath(e["path"]))] = (b, n)
+        grown, caps = [], {}
+        for it in items:
+            if not isinstance(it, str):
+                continue                          # 시퀀스 묶음 — expand_items 가 이미 프레임 수를 봤다
+            if not self._safety_check(it)[0]:
+                continue                          # 보호된 항목 — submit_delete 가 통째로 거부한다(걸어 볼 필요도 없다)
+            with self.lock:
+                _d, idx = self.index_for_path(it)
+                r = model.find_item(idx, it) if idx is not None else None
+                if r is None:
+                    base = None
+                elif r[0] == "dir":
+                    base = (idx.d_size[r[1]], idx.d_files[r[1]])
+                else:
+                    base = (idx.f_size[r[1]], idx.f_count[r[1]])
+            limits = [x for x in (base, exp.get(os.path.normcase(os.path.normpath(it)))) if x is not None]
+            if not limits:
+                continue                          # 인덱스에 없는 작은 파일 — 확인창도 크기를 말하지 않았다
+            lb, ln = min(x[0] for x in limits), min(x[1] for x in limits)
+            caps[it] = (lb, ln)
+            disk = self._disk_totals(it)
+            if disk is None:
+                continue                          # 없거나 못 읽는다 — 작업이 항목별로 알린다
+            if disk[0] > lb or disk[1] > ln:
+                grown.append({"path": it, "bytes": disk[0], "files": disk[1],
+                              "confirmed_bytes": lb, "confirmed_files": ln})
+        if grown:
+            raise ApiError(409, "changed",
+                           "스캔한 뒤 내용이 늘었어요(또는 스캔에서 뺀 폴더가 들어 있어요). "
+                           "다시 스캔해서 확인한 뒤 지워 주세요.",
+                           paths=[g["path"] for g in grown], grown=grown)
+        return caps
+
     # ── 스캔 ──
     def start_scans(self, letters):
         started, skipped = [], []
@@ -606,12 +701,20 @@ class App:
                 continue
             if scanner.is_scanning(_letter(d)):
                 continue
+            with self.lock:
+                self._scan_dirty[_letter(d)] = {}          # 스캔 동안 작업이 바꾼 경로(스캔 시작 전부터 모은다)
             try:
                 h = scanner.start_scan(d, self.settings, self._scan_cb)
             except scanner.ScanBusyError:
+                with self.lock:
+                    self._scan_dirty.pop(_letter(d), None)
                 continue
             with self.lock:
-                self.scans[_letter(d)] = dict(h.progress)
+                p = dict(h.progress)
+                if p.get("phase") in ("done", "error", "canceled"):
+                    p["phase"] = "finalize"       # 작은 드라이브는 여기 오기 전에 끝난다 — 끝 표시는 _scan_watch 만 한다
+                if (self.scans.get(_letter(d)) or {}).get("phase") != "finalize":
+                    self.scans[_letter(d)] = p
             threading.Thread(target=self._scan_watch, args=(h, d), daemon=True).start()
             started.append(_letter(d))
         return started, skipped
@@ -642,6 +745,7 @@ class App:
             bb, _bc = self.bin_info(d)
             key = self._key(d)
             with self.lock:
+                self._replay_dirty(L, idx, d)
                 self.indexes[L] = idx
                 self._offline.pop(L, None)
                 if key:
@@ -657,6 +761,7 @@ class App:
                 self._save_meta()
             self._warm(idx)
         with self.lock:
+            self._scan_dirty.pop(L, None)
             cur = self.scans.get(L)
             if cur is not None:
                 cur = dict(cur)
@@ -666,6 +771,23 @@ class App:
                         cur["error"] = h.error
                 cur["_ended"] = time.time()
                 self.scans[L] = cur
+
+    def _note_dirty(self, L, path):
+        """self.lock 을 쥔 채로. 그 드라이브를 통째로 스캔하는 중이면 — 스캔 결과는 이 변경 전에 걸은 부분(또는
+        옛 분류 규칙)을 담고 있을 수 있다 — 결과를 표에 넣기 직전에 이 경로를 다시 맞춘다(_scan_watch).
+        안 그러면 지운·옮긴 것이 되살아나고 복사한 것이 사라진다."""
+        pend = self._scan_dirty.get(L)
+        if pend is not None:
+            pend.setdefault(os.path.normcase(os.path.normpath(path)), path)
+
+    def _replay_dirty(self, L, idx, d):
+        """self.lock 을 쥔 채로: 스캔 동안 작업이 바꾼 경로를 새 인덱스에 다시 맞춘다(디스크를 다시 본다)."""
+        pend = self._scan_dirty.pop(L, None) or {}
+        for p in pend.values():
+            try:
+                scanner.refresh(idx, p, d, self.settings)
+            except Exception:
+                pass
 
     def cancel_scan(self, L):
         h = scanner.get_scan(_dkey(str(L)) or str(L))
@@ -701,7 +823,8 @@ class App:
                "scanned_bytes": s["scanned_bytes"] if s else 0,
                "files": s["files"] if s else 0, "dirs": s["dirs"] if s else 0,
                "errors": s["errors"] if s else 0,
-               "bin_bytes": bb, "bin_count": bc, "stale": False}
+               "bin_bytes": bb, "bin_count": bc, "stale": False,
+               "also_as": list(d.get("also_as") or [])}
         if not conn:
             out["last_seen"] = d.get("last_seen") or dev.get("last_seen")
             if d.get("last_letter"):
@@ -999,9 +1122,17 @@ class App:
         live = self._live_indexes()
         with self.lock:
             groups = dupes_mod.find_dupes(live, min_bytes)
-        for g in groups:
-            if g["id"] in self.verified:
-                g["verified"] = self.verified[g["id"]]
+        with self.lock:
+            for g in groups:
+                ent = self.verified.get(g["id"])
+                if ent is None:
+                    continue
+                if dupes_mod.fingerprint_matches(ent.get("fp"), g):
+                    g["verified"] = ent.get("res")
+                else:
+                    # 확인한 뒤 구성원·크기·수정 시각이 바뀌었다(다시 내보낸 파일, 새로 나타난 같은 이름의 파일…)
+                    # → 옛 「내용 같음」을 이어 붙이지 않는다(미확인)
+                    del self.verified[g["id"]]
         return groups
 
     def recommendations(self):
@@ -1024,6 +1155,9 @@ class App:
                                "공유 폴더 이름까지 넣어 주세요(예: \\\\%s\\공유이름). [공유 찾기]로 고를 수도 있어요." % host,
                                host=host)
             raise ApiError(400, "invalid_unc", "네트워크 경로 형식이 아니에요. 예: \\\\ORICO\\공유이름")
+        if safety.is_local_unc(u):
+            # 이 PC 자신의 공유(\\localhost\C$·\\내PC이름\…)는 시스템 폴더 보호가 안 걸린다 — 등록부터 받지 않는다
+            raise ApiError(400, "local_share", safety.R_LOCAL_SHARE, unc=u)
         locs = list(self.settings.get("network_locations") or [])
         key = winapi.network_key(u)
         if any(winapi.network_key(x.get("path")) == key for x in locs):
@@ -1039,6 +1173,11 @@ class App:
         self._resync()
         d = self.drive(key)
         msg = None if info.get("connected") else "지금은 연결할 수 없어요. 장치가 켜져 있는지, 경로가 맞는지 확인해 주세요."
+        if d is None:
+            twin = next((x for x in self.drives() if key in (x.get("also_as") or ())), None)
+            if twin is not None:
+                d = twin
+                msg = "이 공유는 이미 %s 로 연결돼 있어요. 한 번만 세도록 그 카드에 함께 보여요." % _drive_name(twin)
         return {"ok": True, "key": key, "unc": u, "label": lab, "connected": bool(info.get("connected")),
                 "message": msg, "drive": self.drive_state(d) if d else None, "settings": self.settings}
 
@@ -1141,7 +1280,7 @@ class App:
             except Exception:
                 kind = 20                       # pywebview FOLDER_DIALOG
             kw = {}
-            if isinstance(initial, str) and initial and os.path.isdir(initial):
+            if isinstance(initial, str) and initial and winapi.path_alive(initial):   # 죽은 NAS 에서 SMB 시간 제한만큼 멈추지 않게
                 kw["directory"] = initial
             try:
                 # pywebview 가 창의 UI 스레드로 넘겨 띄우고, 닫힐 때까지 기다린다
@@ -1175,7 +1314,8 @@ class App:
                 res = dupes_mod.verify_group(g, cancel=ctx.cancelled)
                 if ctx.cancelled():
                     break
-                self.verified[g["id"]] = res
+                with self.lock:
+                    self.verified[g["id"]] = {"res": res, "fp": dupes_mod.fingerprint(g)}
                 if res is True:
                     same += 1
                 elif res is False:
@@ -1199,6 +1339,7 @@ class App:
             ctx.progress(current=path)
             sub = scanner.scan_subtree(path, d, self.settings) if os.path.isdir(path) else None
             with self.lock:
+                self._note_dirty(L, path)
                 idx = self.indexes.get(L)
                 if idx is not None and sub is not None:
                     model.graft(idx, sub, path)
@@ -1212,18 +1353,54 @@ class App:
         return self.queue.submit_task("rescan", title, fn)
 
     def _apply_rules(self, rules):
+        """규칙을 인덱스에 바로 반영한다(다시 스캔 없이). ★가장 깊은 규칙이 이긴다(SPEC §4, Classifier.dir_ctx):
+        model.apply_rule 은 하위 트리 전체를 덮으므로 얕은 규칙부터 적용하고, 적용한 폴더 안에 저장된 다른 규칙은
+        그 뒤에 다시 적용해 되살린다 — 안 그러면 부모 규칙이 자식 규칙을 지우고, 다음 스캔에서 다시 뒤집힌다."""
+        todo = []
         for r in rules:
             p, c = r.get("path"), cats_mod.cat_id(r.get("cat"))
-            if not isinstance(p, str) or c is None:
-                continue
+            if isinstance(p, str) and p and c is not None:
+                todo.append((p, c))
+        if not todo:
+            return
+        saved = []
+        for r in self.settings.get("rules") or []:
+            p, c = r.get("path"), cats_mod.cat_id(r.get("cat"))
+            if isinstance(p, str) and p and c is not None:
+                saved.append((p, c))
+
+        def depth(p):
+            return os.path.normpath(p).rstrip(os.sep).count(os.sep)
+
+        plan, seen = [], set()
+        for p, c in todo:
+            plan.append((p, c))
+            for q, qc in saved:
+                rel = cats_mod.rel_parts(p, q)
+                if rel:                                       # q 는 p 안의 더 깊은 규칙
+                    plan.append((q, qc))
+        out = []
+        for p, c in sorted(plan, key=lambda pc: depth(pc[0])):     # 얕은 것부터(정렬은 안정적 — 같은 깊이는 순서대로)
+            k = os.path.normcase(os.path.normpath(p))
+            if k in seen:
+                out = [x for x in out if os.path.normcase(os.path.normpath(x[0])) != k]
+            seen.add(k)
+            out.append((p, c))
+        touched = {}
+        for p, c in out:
             with self.lock:
                 _d, idx = self.index_for_path(p)
+                if _d is not None:
+                    self._note_dirty(_letter(_d), p)      # 스캔 중이면 그 결과는 옛 규칙으로 분류돼 있다
                 if idx is not None and model.find_dir(idx, p) is not None:
                     model.apply_rule(idx, p, c)
-                    try:
-                        store.save_index(idx)
-                    except (OSError, ValueError):
-                        pass
+                    touched[id(idx)] = idx
+        for idx in touched.values():
+            with self.lock:
+                try:
+                    store.save_index(idx)
+                except (OSError, ValueError):
+                    pass
 
     def add_rule(self, path, cat):
         c = cats_mod.cat_id(cat)
@@ -1274,6 +1451,9 @@ class App:
         if not isinstance(partial, dict):
             raise ApiError(400, "invalid", "설정 형식이 올바르지 않아요.")
         partial = {k: v for k, v in partial.items() if k != "rules"}
+        nl = partial.get("network_locations")
+        if isinstance(nl, list) and any(isinstance(x, dict) and safety.is_local_unc(x.get("path")) for x in nl):
+            raise ApiError(400, "local_share", safety.R_LOCAL_SHARE)
         return self._save_settings(partial)
 
     def reveal(self, path):
@@ -1301,6 +1481,22 @@ class App:
     def team_export(self):
         return settings_mod.export_team(self.settings)
 
+    def _known_exists(self, path):
+        """남이 준 경로가 이 PC 에 있는가 — 이미 아는(연결된) 드라이브 안일 때만 디스크를 본다.
+
+        모르는 UNC 호스트를 stat 하면 Windows 가 그 호스트에 인증을 시도한다(NTLM 응답 유출 · SMB 시간 제한만큼 멈춤).
+        아는 네트워크 드라이브도 죽어 있을 수 있어 시간 제한(path_alive)으로만 본다.
+        """
+        d = self.drive_for_path(path)
+        if d is None or not _connected(d):
+            return False
+        if d.get("kind") == "network" or d.get("unc"):
+            return winapi.path_alive(path)
+        try:
+            return os.path.exists(path)
+        except (OSError, ValueError):
+            return False
+
     def team_import(self, data, apply=False):
         if isinstance(data, str):
             if len(data) > BODY_MAX:
@@ -1310,7 +1506,7 @@ class App:
             except ValueError:
                 raise ApiError(400, "bad_team_file", "팀 설정 파일을 읽지 못했어요.")
         try:
-            new, diff = settings_mod.import_team(self.settings, data)
+            new, diff = settings_mod.import_team(self.settings, data, exists=self._known_exists)
         except ValueError as e:
             raise ApiError(400, "bad_team_file", "%s." % e)
         if not apply:
@@ -1538,6 +1734,64 @@ class App:
         self._stats = (0.0, None)
         return {"ok": True, "removed": n, "bytes": b}
 
+    # ── 창 닫기 ──
+    _CLOSE_GUARD = ("move", "copy", "recycle", "delete", "empty_bin", "undo")
+
+    def close_state(self):
+        """창을 닫으면 멈추는 파일 작업(분석 작업은 빼고). deleting = 원본을 지우는 중 — 닫으면 그 항목을 마저 지운 뒤 닫힌다."""
+        act = [j for j in self.queue.active() if j.get("type") in self._CLOSE_GUARD]
+        return {"busy": bool(act), "deleting": self.queue.deleting(),
+                "grace_s": int(self.queue.delete_grace),
+                "jobs": [{"id": j.get("id"), "type": j.get("type"), "status": j.get("status"),
+                          "title": j.get("title") or ""} for j in act[:20]]}
+
+    def window_closing(self):
+        """pywebview closing — False 면 창을 닫지 않는다. 파일 작업 중이면 화면에 물어본다.
+
+        물어보지 못하면(화면이 아직 없거나 오류) 닫는다 — 사용자를 창에 가두지 않는다(fail-open)."""
+        if self._close_ok:
+            return True
+        try:
+            st = self.close_state()
+        except Exception:
+            return True
+        w = self.window
+        if not st["busy"] or w is None:
+            return True
+
+        def ask():
+            ok = False
+            try:
+                ok = w.evaluate_js("!!(window.DriveBoard && window.DriveBoard.askClose && "
+                                   "window.DriveBoard.askClose(%s))" % json.dumps(st, ensure_ascii=True)) is True
+            except Exception:
+                ok = False
+            if not ok:
+                self.request_close()
+        # closing 은 UI 스레드에서 불린다 — evaluate_js 가 같은 스레드를 기다리면 멈추므로 따로 돌린다
+        threading.Thread(target=ask, name="ask-close", daemon=True).start()
+        return False
+
+    def request_close(self):
+        """화면의 [멈추고 닫기] — 진행 중인 작업을 멈추고(원본 삭제 단계는 마저 끝낸 뒤) 창을 닫는다."""
+        w = self.window
+        if w is None:
+            raise ApiError(400, "no_window", "창 없이 실행 중이라 여기서 닫을 수 없어요.")
+        self._close_ok = True
+        deleting = self.queue.deleting()
+
+        def run():
+            try:
+                self.queue.stop(timeout=5.0)
+            except Exception:
+                pass
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        threading.Thread(target=run, name="close", daemon=True).start()
+        return {"ok": True, "deleting": deleting}
+
     def shutdown(self):
         try:
             self.queue.stop(timeout=5.0)
@@ -1593,7 +1847,28 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, d)
 
     def _gate(self, is_api):
-        """보안 관문 — 모든 요청이 여기 한 곳을 지난다 (SPEC §7)."""
+        """보안 관문 — 모든 요청이 여기 한 곳을 지난다 (SPEC §7).
+
+        ★거절할 때는 연결을 닫는다: 본문을 읽지 않은 채 keep-alive 로 두면 그 본문이 「두 번째 요청」 으로
+        읽혀(요청 밀수) 브라우저가 붙인 Origin·Sec-Fetch-* 없이 관문을 다시 지난다.
+        """
+        te = self.headers.get("Transfer-Encoding")
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            clen = -1
+        if te is not None or clen < 0:
+            self.close_connection = True          # chunked 는 받지 않는다(본문 경계를 맞출 수 없다)
+            self._err(400, "bad_request", "요청을 읽지 못했어요.")
+            return False
+        if self.command in ("GET", "HEAD") and clen > 0:
+            self.close_connection = True          # GET 본문은 읽지 않는다 — 다음 요청으로 읽히지 않게 닫는다
+        ok = self._gate_check(is_api)
+        if not ok:
+            self.close_connection = True
+        return ok
+
+    def _gate_check(self, is_api):
         port = self.server.server_address[1]
         if self.headers.get("Host", "") not in ("127.0.0.1:%d" % port, "localhost:%d" % port):
             self._err(403, "forbidden", "허용되지 않은 접근이에요.")
@@ -1654,6 +1929,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._gate(True):
             return
         if not u.path.startswith("/api/"):
+            self.close_connection = True          # 본문을 읽지 않았다
             return self._err(404, "not_found", "없는 주소예요.")
 
         def run():
@@ -1704,7 +1980,13 @@ class Handler(BaseHTTPRequestHandler):
         shown = False
         w = A.window
         if w is not None:
-            for name in ("restore", "show"):
+            # restore() 는 WinForms 에서 WindowState=Normal 이라 최대화한 창을 작게 만든다 — 최소화돼 있을 때만,
+            # 그리고 최소화 전에 최대화였으면 다시 최대화한다(창 상태는 main() 이 events 로 따라간다)
+            st = getattr(A, "win_state", None) or {}
+            names = ["show"]
+            if st.get("now") == "min":
+                names = ["restore", "maximize", "show"] if st.get("before") == "max" else ["restore", "show"]
+            for name in names:
                 try:
                     getattr(w, name)()
                     shown = True
@@ -1790,18 +2072,24 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/ops/delete":
             if b.get("confirm") is not True:
                 raise ApiError(400, "need_confirm", "영구 삭제는 복구할 수 없어요. 확인한 뒤 다시 요청해 주세요.")
-            return {"ok": True, "job_id": Q.submit_delete(A.expand_items(b.get("paths")))}
+            items = A.expand_items(b.get("paths"))
+            caps = A.check_growth(items, b.get("expect"))
+            return {"ok": True, "job_id": Q.submit_delete(items, limits=caps)}
         if p == "/api/ops/empty_bin":
             ds = b.get("drives")
             if not isinstance(ds, list):
                 raise ApiError(400, "invalid", "드라이브 목록이 올바르지 않아요.")
+            if b.get("confirm") is not True:
+                raise ApiError(400, "need_confirm", "휴지통을 비우면 복구할 수 없어요. 확인한 뒤 다시 요청해 주세요.")
             return {"ok": True, "job_id": Q.submit_empty_bin([_dkey(str(x)) or str(x) for x in ds])}
         if p == "/api/ops/cancel":
             if not Q.cancel(str(b.get("job_id", ""))):
                 raise ApiError(404, "not_found", "취소할 작업을 찾을 수 없어요.")
             return {"ok": True}
+        if p == "/api/app/close":
+            return A.request_close()
         if p == "/api/ops/undo":
-            return {"ok": True, "job_id": Q.undo(str(b.get("job_id", "")))}
+            return {"ok": True, "job_id": Q.undo(str(b.get("job_id", "")), confirm=b.get("confirm") is True)}
         if p == "/api/reveal":
             return {"ok": True, "shown": A.reveal(b.get("path"))}
         if p == "/api/dupes/verify":
@@ -1936,6 +2224,10 @@ def find_running(timeout=2.0):
         return None
     if not isinstance(data, dict) or data.get("app") != "DriveBoard" or not data.get("ok"):
         return None
+    # 응답한 쪽이 준 url 은 쓰지 않는다 — 옛 잠금 파일의 포트를 다른 프로그램이 잡고 있을 수 있고,
+    # 그 url 을 webbrowser.open(Windows 는 os.startfile)에 넘기면 아무 파일·프로토콜이나 열린다
+    data = dict(data)
+    data["url"] = "http://127.0.0.1:%d/" % port
     return data
 
 
@@ -1967,6 +2259,38 @@ def _apply_dark_titlebar(title):
         pass
 
 
+def selftest_gui():
+    """배포본 자가 진단(--selftest-gui): 창을 띄우지 않고 네이티브 창 스택(pywebview·WinForms·EdgeChromium·pythonnet·
+    WebView2 어셈블리)이 실제로 올라오는지만 본다. 0 = 정상, 1 = 실패(무엇이 빠졌는지 기록). 서버는 띄우지 않는다."""
+    step = "webview"
+    try:
+        import webview  # type: ignore  # noqa: F401
+        step = "webview.platforms.winforms"
+        import webview.platforms.winforms  # type: ignore  # noqa: F401
+        step = "webview.platforms.edgechromium"
+        import webview.platforms.edgechromium  # type: ignore  # noqa: F401
+        step = "clr"
+        import clr  # type: ignore
+        step = "Microsoft.Web.WebView2.Core"
+        clr.AddReference("Microsoft.Web.WebView2.Core")
+    except BaseException as e:  # noqa: BLE001 — SystemExit·DLL 로드 실패까지 전부 「실패」로 알린다
+        msg = "selftest-gui FAIL at %s: %s: %s" % (step, type(e).__name__, e)
+        rc = 1
+    else:
+        msg = "selftest-gui OK"
+        rc = 0
+    try:
+        with open(os.path.join(store.data_dir(), "selftest-gui.log"), "w", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+    try:
+        print(msg, file=sys.stderr if rc else sys.stdout, flush=True)
+    except Exception:
+        pass
+    return rc
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="DriveBoard")
     ap.add_argument("--no-open", action="store_true", help="창 없이 서버만")
@@ -1974,6 +2298,7 @@ def main(argv=None):
     ap.add_argument("--fake", default=None, help="가짜 드라이브 폴더(개발·테스트)")
     ap.add_argument("--multi", action="store_true", help="이미 떠 있어도 하나 더 띄운다(개발용)")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--selftest-gui", action="store_true", help="창 스택이 올라오는지만 확인하고 끝낸다(배포 검사용)")
     a = ap.parse_args(argv)
     if sys.stdout is None or sys.stderr is None:      # pythonw: 콘솔이 없다 → 로그 파일로
         try:
@@ -1982,6 +2307,8 @@ def main(argv=None):
             logf = open(os.devnull, "w", encoding="utf-8")
         sys.stdout = sys.stdout or logf
         sys.stderr = sys.stderr or logf
+    if a.selftest_gui:
+        return selftest_gui()
     single = not a.no_open and not a.multi
     if single:
         other = find_running()
@@ -2043,7 +2370,37 @@ def main(argv=None):
     except Exception:
         pass
     try:
-        webview.start()
+        # 이동·삭제 중에 닫으면 화면에서 먼저 묻는다(False = 닫지 않음). 원본 삭제 단계는 stop() 이 마저 끝낸다.
+        win.events.closing += app.window_closing
+    except Exception:
+        pass
+    app.win_state = {"now": "normal", "before": "normal"}
+
+    def _ws(now):
+        def fn(*_a):
+            st = app.win_state
+            if now == "min":
+                st["before"] = st.get("now") if st.get("now") != "min" else st.get("before")
+            st["now"] = now
+        return fn
+    for ev, now in (("minimized", "min"), ("maximized", "max"), ("restored", "normal")):
+        try:
+            getattr(win.events, ev).__iadd__(_ws(now))
+        except Exception:
+            pass
+    try:
+        # private_mode 기본값(True)은 매 실행 버리는 프로필이라 프로젝트 보기의 localStorage(묶기·정렬·접기·음량)가 사라진다
+        kw = {}
+        try:
+            import inspect
+            ps = inspect.signature(webview.start).parameters
+            if "private_mode" in ps:
+                kw["private_mode"] = False
+            if "storage_path" in ps:
+                kw["storage_path"] = os.path.join(store.data_dir(), "webview")
+        except (TypeError, ValueError):
+            pass
+        webview.start(**kw)
     finally:
         app.window = None
         srv.shutdown()

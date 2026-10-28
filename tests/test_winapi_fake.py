@@ -536,6 +536,28 @@ class NetworkPieces(unittest.TestCase):
         self.assertEqual((winapi.DRIVE_REMOVABLE, winapi.DRIVE_FIXED, winapi.DRIVE_REMOTE), (2, 3, 4))
         self.assertEqual(winapi.MAX_PREFERRED_LENGTH, 0xFFFFFFFF)
 
+    def test_local_has_bin_rule(self):
+        """이동식(SD·USB 메모리)은 $RECYCLE.BIN 폴더가 남아 있어도 휴지통 없음 — 셸이 거기선 영구 삭제한다."""
+        tmp = tempfile.mkdtemp(prefix="db-hasbin-")
+        try:
+            with_bin = os.path.join(tmp, "with") + os.sep
+            no_bin = os.path.join(tmp, "without") + os.sep
+            os.makedirs(with_bin + winapi.BIN_DIR)
+            os.makedirs(no_bin)
+            f = winapi._win_local_has_bin
+            R, F, N = winapi.DRIVE_REMOVABLE, winapi.DRIVE_FIXED, winapi.DRIVE_REMOTE
+            for fs in ("FAT32", "exFAT", "NTFS", ""):
+                self.assertFalse(f(R, fs, with_bin), "removable %s + 폴더" % fs)
+                self.assertFalse(f(R, fs, no_bin), "removable %s" % fs)
+            self.assertTrue(f(F, "NTFS", no_bin))
+            self.assertTrue(f(F, "ReFS", no_bin))
+            self.assertTrue(f(F, "exFAT", with_bin))
+            self.assertFalse(f(F, "exFAT", no_bin))
+            self.assertFalse(f(N, "NTFS", with_bin))
+            self.assertFalse(f(5, "CDFS", with_bin))                  # CD-ROM
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

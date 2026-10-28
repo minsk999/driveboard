@@ -61,9 +61,12 @@ def _int(v):
         return int(v)
     if isinstance(v, str):
         try:
-            return int(float(v.strip()))
+            x = float(v.strip())
         except ValueError:
             return None
+        if x != x or abs(x) >= 1e15:          # nan · inf · 1e400 — int() 가 OverflowError 를 낸다
+            return None
+        return int(x)
     return None
 
 
@@ -361,13 +364,31 @@ def _dict_diff(old, new_items):
     return {"added": added, "changed": changed, "same": same}
 
 
-def import_team(settings, data):
+def _local_exists(p):
+    """exists 의 안전한 기본값 — 네트워크 경로(\\\\host\\…, //host/…, \\\\?\\UNC\\…)는 묻지도 않는다.
+
+    가져온 파일이 적은 경로를 그대로 stat 하면 Windows 가 그 호스트에 SMB/WebDAV 로 붙으며
+    사용자의 NTLM 응답을 보낸다(미리보기만 해도). 호출자(App)는 아는 드라이브만 보게 하는 함수를 넘긴다.
+    """
+    if not isinstance(p, str) or p.startswith(("\\\\", "//")):
+        return False
+    try:
+        return os.path.exists(p)
+    except (OSError, ValueError):
+        return False
+
+
+def import_team(settings, data, exists=None):
     """(new_settings, preview_diff). 저장은 하지 않는다 — 미리보기를 보여 준 뒤 호출자가 save().
 
     가져온 값은 추가·덮어쓰기만 하고 기존 항목을 지우지 않는다. 분류 규칙은 경로라서 이 PC 에
     그 경로가 없을 수 있다(드라이브 문자가 다른 PC) → diff 의 exists 로 알린다.
+    exists(path) -> bool: 그 경로가 이 PC 에 있는가. ★남이 만든 파일의 경로라 아무 곳이나 건드리면 안 된다 —
+    기본값은 네트워크 경로를 묻지 않는 _local_exists, App 은 「이미 아는 드라이브 안」만 보게 한다.
     형식이 틀리면 ValueError.
     """
+    if exists is None:
+        exists = _local_exists
     if not isinstance(data, dict) or data.get("format") != TEAM_FORMAT:
         raise ValueError("팀 설정 파일 형식이 아니에요")
     try:
@@ -385,7 +406,11 @@ def import_team(settings, data):
     old_rules = {_path_key(x["path"]): x for x in cur["rules"]}
     radd, rchg, rsame = [], [], 0
     for x in r:
-        e = {"path": x["path"], "cat": x["cat"], "exists": os.path.exists(x["path"])}
+        try:
+            ok = bool(exists(x["path"]))
+        except Exception:      # noqa: BLE001 — 모르면 없는 것으로 본다(적용하지 않는다)
+            ok = False
+        e = {"path": x["path"], "cat": x["cat"], "exists": ok}
         o = old_rules.get(_path_key(x["path"]))
         if o is None:
             radd.append(e)

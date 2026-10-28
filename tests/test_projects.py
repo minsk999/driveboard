@@ -318,5 +318,59 @@ class TestVideos(Base):
         self.assertEqual(p["name"], "BF_v01.mp4")
 
 
+class TestCollections(unittest.TestCase):
+    """모음 폴더가 프로젝트를 삼키지 않는다 — 월 폴더(2026-08), aep 가 한 곳에만 바로 있는 모음, 도구 폴더(AE)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dbtest-coll-")
+        self.root = os.path.join(self.tmp, "D")
+        os.makedirs(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def detect(self, tree, settings=None):
+        write_tree(self.root, tree)
+        idx = scanner.scan_subtree(self.root, {"letter": "D", "root": self.root}, {})
+        return sorted(os.path.relpath(p["path"], self.root).replace(os.sep, "/")
+                      for p in projects.detect_projects(idx, settings or {}))
+
+    def test_month_folders_are_containers(self):
+        T = ts(2026, 8, 5)
+        got = self.detect({
+            "작업/2026-08/260803_소담코스_녹차_KMS/render/a.mp4": (2 * MB, T),
+            "작업/2026-08/260810_한결증권_런칭_HYC/render/b.mp4": (2 * MB, T),
+            "작업/2026_09/260903_바른기술_인터뷰_JJH/render/c.mp4": (2 * MB, T),
+            "작업/2026-12 정리/261203_다온_SNS/render/d.mp4": (2 * MB, T),
+            "작업/2026-10/x.mp4": (2 * MB, T),                       # 날짜 이름 자식 없음 → 그래도 모음(아무것도 아님)
+            # 이름이 붙은 월 폴더는 프로젝트 — 안의 같은 날 수정본 폴더는 그 일부
+            "2025-11_한빛은행_런칭/render/HB.mov": (2 * MB, T),
+            "2025-11_한빛은행_런칭/251105_수정본/HB2.mov": (2 * MB, T),
+            "2025-12_한빛은행/251205_수정본/x.mov": (2 * MB, T),
+            "2026-07/a.aep": (2 * MB, T),                            # 월 이름에 aep 직속 → 프로젝트
+        })
+        self.assertEqual(got, sorted([
+            "작업/2026-08/260803_소담코스_녹차_KMS", "작업/2026-08/260810_한결증권_런칭_HYC",
+            "작업/2026_09/260903_바른기술_인터뷰_JJH", "작업/2026-12 정리/261203_다온_SNS",
+            "2025-11_한빛은행_런칭", "2025-12_한빛은행", "2026-07"]))
+
+    def test_single_aep_child_does_not_swallow_siblings(self):
+        T = ts(2025, 1, 1)
+        got = self.detect({
+            "Projects3/a/x.aep": (2 * MB, T),
+            "Projects3/b/AE/y.aep": (2 * MB, T),
+            "Projects2/소담_런칭/AE/v1/x.aep": (2 * MB, T),
+            "작업/소담_런칭/소담.aep": (2 * MB, T),
+            "작업/260803_한결증권_런칭_HYC/render/r.mp4": (50 * MB, T),
+            "작업/260901_다온_SNS/AE/c.aep": (2 * MB, T),
+            # 도구 폴더에 aep 가 있는 프로젝트의 날짜 수정본 폴더는 그 프로젝트의 일부
+            "한결_SNS/AE/s.aep": (2 * MB, T),
+            "한결_SNS/260807_2차_수정/r.mp4": (2 * MB, T),
+        })
+        self.assertEqual(got, sorted([
+            "Projects3/a", "Projects3/b", "Projects2/소담_런칭",
+            "작업/소담_런칭", "작업/260803_한결증권_런칭_HYC", "작업/260901_다온_SNS", "한결_SNS"]))
+
+
 if __name__ == "__main__":
     unittest.main()

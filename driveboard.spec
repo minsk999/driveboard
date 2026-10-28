@@ -26,14 +26,18 @@ def _read_version():
         if not m:
             raise SystemExit("driveboard.spec: core/version.py 에 %s 가 없습니다" % key)
         vals[key] = m.group(1)
-    if not re.match(r"^\d+\.\d+\.\d+$", vals["VERSION"]):
-        raise SystemExit("driveboard.spec: VERSION 형식이 X.Y.Z 가 아닙니다: %r" % vals["VERSION"])
+    # X.Y.Z 또는 X.Y.Z-pre(점으로 나눈 영숫자 식별자) — release.yml 은 '-' 가 든 태그를 prerelease 로 올린다.
+    # '+빌드' 꼬리는 받지 않는다(태그·ProductVersion 대조가 문자열 그대로라 의미가 없다).
+    if not re.match(r"^\d+\.\d+\.\d+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$", vals["VERSION"]):
+        raise SystemExit("driveboard.spec: VERSION 형식이 X.Y.Z(-pre) 가 아닙니다: %r" % vals["VERSION"])
     return vals
 
 
 META = _read_version()
-VER4 = tuple(int(x) for x in META["VERSION"].split(".")) + (0,)
+# Windows 버전 리소스의 숫자 칸은 X.Y.Z.0 — prerelease 꼬리는 문자열(FileVersion·ProductVersion)에만 남는다.
+VER4 = tuple(int(x) for x in META["VERSION"].split("-", 1)[0].split(".")) + (0,)
 APP = META["APP_NAME"]
+VS_FF_FLAGS = 0x2 if "-" in META["VERSION"] else 0x0   # VS_FF_PRERELEASE
 
 
 def _version_resource():
@@ -41,7 +45,7 @@ def _version_resource():
         FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo, VarStruct, VSVersionInfo)
     v = META["VERSION"]
     return VSVersionInfo(
-        ffi=FixedFileInfo(filevers=VER4, prodvers=VER4, mask=0x3F, flags=0x0, OS=0x40004,
+        ffi=FixedFileInfo(filevers=VER4, prodvers=VER4, mask=0x3F, flags=VS_FF_FLAGS, OS=0x40004,
                           fileType=0x1, subtype=0x0, date=(0, 0)),
         kids=[
             StringFileInfo([StringTable("041204B0", [

@@ -301,9 +301,11 @@ def _read(path, mode="r"):
 # =================================================================== 시험
 class Version(unittest.TestCase):
     def test_format(self):
-        self.assertRegex(V.VERSION, r"^\d+\.\d+\.\d+$")
+        # X.Y.Z 또는 X.Y.Z-pre(prerelease 태그용) — driveboard.spec 의 검사와 같은 규칙.
+        self.assertRegex(V.VERSION, r"^\d+\.\d+\.\d+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$")
         self.assertEqual(V.REPO, "minsk999/driveboard")
-        self.assertEqual(V.version_tuple(), tuple(int(x) for x in V.VERSION.split(".")) + (0,))
+        self.assertEqual(V.version_tuple(),
+                         tuple(int(x) for x in V.VERSION.split("-", 1)[0].split(".")) + (0,))
         self.assertEqual(V.version_tuple("1.2.3-rc.1"), (1, 2, 3, 0))
 
     def test_package_version_matches(self):
@@ -380,13 +382,23 @@ def _fake_pyinstaller():
     return mods
 
 
+# spec 이 읽는 환경 변수 — 호출자가 env 로 주지 않으면 실행 동안 지운다.
+# release.yml·build.bat 은 빌드 단계에서 DRIVEBOARD_REQUIRE_FFMPEG=1 을 켠다. 그 값이 시험 실행에
+# 새어 들어오면 bin/ 없는 임시 트리의 spec 이 SystemExit 를 내 시험이 환경에 따라 깨진다.
+SPEC_ENV_KEYS = ("DRIVEBOARD_REQUIRE_FFMPEG",)
+
+
 def run_spec(root, platform="win32", env=None):
-    """root 의 driveboard.spec 을 가짜 PyInstaller 로 실행 → 전역 dict."""
+    """root 의 driveboard.spec 을 가짜 PyInstaller 로 실행 → 전역 dict.
+
+    환경은 격리한다: SPEC_ENV_KEYS 는 env 에 없으면 지운 채로 실행하고, 끝나면 원래대로 되돌린다.
+    """
     src = _read(os.path.join(root, "driveboard.spec"))
     mods = _fake_pyinstaller()
     saved_mods = {k: sys.modules.get(k) for k in mods}
     saved_plat = sys.platform
-    saved_env = {k: os.environ.get(k) for k in (env or {})}
+    env = dict(env or {})
+    saved_env = {k: os.environ.get(k) for k in set(SPEC_ENV_KEYS) | set(env)}
     g = {"__name__": "__main__", "SPECPATH": root,
          "Analysis": lambda *a, **k: _Rec("Analysis", *a, **k),
          "PYZ": lambda *a, **k: _Rec("PYZ", *a, **k),
@@ -395,7 +407,10 @@ def run_spec(root, platform="win32", env=None):
     try:
         sys.modules.update(mods)
         sys.platform = platform
-        for k, v in (env or {}).items():
+        for k in SPEC_ENV_KEYS:
+            if k not in env:
+                os.environ.pop(k, None)
+        for k, v in env.items():
             os.environ[k] = v
         with contextlib.redirect_stdout(io.StringIO()):
             exec(compile(src, "driveboard.spec", "exec"), g)
@@ -477,6 +492,50 @@ class Spec(unittest.TestCase):
         g = run_spec(self._tree(with_ffmpeg=False), platform="linux")
         self.assertIsNone(g["exe"].kw["version"])
 
+    def test_inherited_require_ffmpeg_is_isolated(self):
+        # 회귀: release.yml 이 잡 전체에 DRIVEBOARD_REQUIRE_FFMPEG=1 을 걸어 'Unit tests' 단계에서
+        # 이 클래스의 시험 둘이 SystemExit 로 깨졌다 → 태그를 밀어도 릴리스가 한 번도 안 나왔다.
+        tmp = self._tree(with_ffmpeg=False)
+        old = os.environ.get("DRIVEBOARD_REQUIRE_FFMPEG")
+        os.environ["DRIVEBOARD_REQUIRE_FFMPEG"] = "1"
+        try:
+            g = run_spec(tmp)                                  # 물려받은 값은 무시된다
+            self.assertFalse(any(d == "bin" for _s, d in g["a"].kw["datas"]))
+            self.assertEqual(os.environ.get("DRIVEBOARD_REQUIRE_FFMPEG"), "1")   # 되돌려 놓는다
+            with self.assertRaises(SystemExit):                # 명시하면 여전히 막는다
+                run_spec(tmp, env={"DRIVEBOARD_REQUIRE_FFMPEG": "1"})
+            self.assertEqual(os.environ.get("DRIVEBOARD_REQUIRE_FFMPEG"), "1")
+        finally:
+            if old is None:
+                os.environ.pop("DRIVEBOARD_REQUIRE_FFMPEG", None)
+            else:
+                os.environ["DRIVEBOARD_REQUIRE_FFMPEG"] = old
+
+    def _with_version(self, version):
+        tmp = self._tree(with_ffmpeg=True)
+        vp = os.path.join(tmp, "core", "version.py")
+        src = _read(vp)
+        src2 = re.sub(r'^VERSION\s*=\s*"[^"]*"', 'VERSION = "%s"' % version, src, count=1, flags=re.M)
+        self.assertNotEqual(src, src2)
+        with open(vp, "w", encoding="utf-8", newline="") as fh:
+            fh.write(src2)
+        return tmp
+
+    def test_prerelease_version(self):
+        # release.yml 은 '-' 가 든 태그(v1.1.0-rc.1)를 prerelease 로 올린다 — spec 도 그 VERSION 을 받아야 한다.
+        g = run_spec(self._with_version("1.1.0-rc.1"))
+        ver = repr(g["exe"].kw["version"])
+        self.assertIn("'ProductVersion', '1.1.0-rc.1'", ver)     # release.yml 이 태그와 그대로 대조한다
+        self.assertIn("filevers': (1, 1, 0, 0)", ver)              # 숫자 칸은 X.Y.Z 만
+        self.assertIn("'flags': 2", ver)                           # VS_FF_PRERELEASE
+        self.assertIn("'flags': 0", repr(run_spec(self._tree(with_ffmpeg=True))["exe"].kw["version"]))
+        self.assertEqual(V.version_tuple("1.1.0-rc.1"), (1, 1, 0, 0))
+
+    def test_bad_version_rejected(self):
+        for bad in ("1.1", "1.1.0-", "1.1.0-rc..1", "1.1.0+build", "v1.1.0", "1.1.0 rc"):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                run_spec(self._with_version(bad))
+
 
 class FfmpegPin(unittest.TestCase):
     def test_release_yml(self):
@@ -516,6 +575,25 @@ class BuildBat(unittest.TestCase):
         for needle in ("pyinstaller", "driveboard.spec", "unittest discover", "DriveBoard-Windows.zip",
                        "Get-FileHash", "pywebview", "--write-icon"):
             self.assertIn(needle.lower(), s.lower(), needle)
+
+    def test_require_ffmpeg_not_leaked_into_tests(self):
+        # 회귀: 'set DRIVEBOARD_REQUIRE_FFMPEG=1' 이 :run_tests 보다 앞에 있어 spec 시험이 SystemExit 로 깨졌다.
+        lines = _read(BAT_PATH).splitlines()
+        def first(pred, what):
+            for i, ln in enumerate(lines):
+                if pred(ln.strip().lower()):
+                    return i
+            self.fail("build.bat 에 없음: " + what)
+        set_on = first(lambda l: l == 'set "driveboard_require_ffmpeg=1"', "set REQUIRE_FFMPEG=1")
+        call_tests = first(lambda l: "call :run_tests" in l, "call :run_tests")
+        pyi = first(lambda l: "-m pyinstaller" in l, "PyInstaller")
+        self.assertLess(call_tests, set_on)
+        self.assertLess(set_on, pyi)
+        sub = first(lambda l: l == ":run_tests", ":run_tests")
+        disc = first(lambda l: "unittest discover" in l, "unittest discover")
+        clr = [i for i, ln in enumerate(lines)
+               if ln.strip().lower() == 'set "driveboard_require_ffmpeg="' and sub < i < disc]
+        self.assertTrue(clr, ":run_tests 가 DRIVEBOARD_REQUIRE_FFMPEG 를 비우지 않습니다")
 
 
 def _steps(job):
@@ -558,6 +636,26 @@ class Workflows(unittest.TestCase):
         self.assertLess(idx("Unit tests"), idx("Build with PyInstaller"))
         self.assertLess(idx("Build with PyInstaller"), idx("Zip"))
         self.assertLess(idx("Zip"), idx("softprops"))
+        # DRIVEBOARD_REQUIRE_FFMPEG 는 PyInstaller 단계에만 — 잡 전체에 걸면 'Unit tests' 로 샌다(회귀).
+        self.assertNotIn("DRIVEBOARD_REQUIRE_FFMPEG", job.get("env") or {})
+        self.assertNotIn("DRIVEBOARD_REQUIRE_FFMPEG", doc.get("env") or {})
+        steps = _steps(job)
+        for st in steps:
+            if "Build with PyInstaller" in st.get("name", ""):
+                self.assertEqual(str((st.get("env") or {}).get("DRIVEBOARD_REQUIRE_FFMPEG")), "1")
+                # --no-open 스모크는 webview 를 안 불러 네이티브 창 DLL 누락을 못 잡는다 → 이름으로 확인.
+                for dll in ("Python.Runtime.dll", "ClrLoader.dll", "Microsoft.Web.WebView2.Core.dll",
+                            "WebView2Loader.dll"):
+                    self.assertIn(dll, st["run"], dll)
+            else:
+                self.assertNotIn("DRIVEBOARD_REQUIRE_FFMPEG", st.get("env") or {}, st.get("name"))
+        # 창 스택 자가 진단(app.py --selftest-gui)을 스모크 단계에서 종료 코드로 본다
+        smoke = next(st for st in steps if "Smoke test" in st.get("name", ""))
+        self.assertIn("--selftest-gui", smoke["run"])
+        self.assertIn("ExitCode", smoke["run"])
+        self.assertLess(smoke["run"].index("--selftest-gui"), smoke["run"].index("@('--no-open'"))
+        # prerelease 태그(v1.1.0-rc.1)를 광고하므로 spec 도 그 VERSION 을 받는다(Spec.test_prerelease_version).
+        self.assertIn("contains(github.ref_name, '-')", text)
 
     def test_tests_workflow(self):
         text = _read(TEST_WF_PATH)

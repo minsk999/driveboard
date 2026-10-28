@@ -11,6 +11,10 @@
 - 휴지통이 없는 위치(NAS·대부분의 USB 메모리, has_bin:false)에 휴지통 보내기는 거부(no_bin) — 영구 삭제는
   submit_delete 로만, 사용자가 명시적으로 고른 경우에만.
 - 장치가 빠지거나 NAS 가 끊기면(입출력 오류) 그 항목은 되돌리고 작업을 멈춘다 — 원본은 그대로다.
+  원본을 지우는 단계에서 원본 장치가 빠지면 그 항목은 '일부만 옮김'으로 남기고 사본은 거두지 않는다.
+- 원본 삭제 단계에 들어가기 직전·항목이 끝난 직후 기록을 바로 디스크에 남긴다 — 앱이 죽어도 다음 실행이
+  저장된 항목 상태로 안내한다(원본이 그대로라고 단정하지 않는다). stop() 은 그 단계가 끝나길 기다린다.
+- 되돌리기는 작업 때 기록한 볼륨 일련번호와 지금 그 문자의 디스크가 다르면 하지 않는다(drive_changed).
 
 hooks(모두 선택, dict 또는 속성 객체):
   size_of(path) -> (bytes, files) | None   인덱스로 빠르게 크기 조회(없으면 디스크를 걷는다)
@@ -62,6 +66,9 @@ R_COPY_CHANGED = "복사한 뒤 바뀐 파일이라 남겨 뒀어요."
 R_ORIG_GONE = "원본이 없어져 복사본이 유일본이라 남겨 뒀어요."
 R_ORIG_CHANGED = "복사한 뒤 원본이 바뀌어 복사본을 남겨 뒀어요."
 R_DEST_OFFLINE = "대상 장치가 연결되어 있지 않아요."
+R_GREW = "확인한 뒤 내용이 늘어 지우지 않았어요. 다시 스캔해서 확인한 뒤 지워 주세요."
+R_DRIVE_CHANGED = ("%s 에 그때와 다른 디스크가 연결돼 있어요(볼륨 일련번호가 달라요). "
+                   "다른 디스크의 파일을 건드리지 않도록 되돌리지 않았어요.")
 
 # 장치 분리·네트워크 끊김으로 보는 오류(Windows winerror / POSIX errno)
 _DEVLOST_WINERR = frozenset({21, 51, 53, 55, 59, 64, 67, 121, 1167, 1231, 1232, 1236, 433})
@@ -72,7 +79,8 @@ _DEVLOST_ERRNO = frozenset(e for e in (getattr(errno, n, None) for n in (
 
 class OpError(Exception):
     """작업을 시작하지 않는 검증 오류.
-    code: protected|same_drive|space|empty|unknown_drive|invalid|invalid_dest|not_found|not_undoable|no_bin|need_dest"""
+    code: protected|same_drive|space|empty|unknown_drive|invalid|invalid_dest|not_found|not_undoable|no_bin|need_dest|
+          drive_changed"""
 
     def __init__(self, code, message, extra=None):
         super().__init__(message)
@@ -445,6 +453,25 @@ def _disp(d, key=None):
     return k or "?"
 
 
+def _serial_of(d):
+    return str((d or {}).get("serial") or "")
+
+
+def _serial_mismatch(drives, expect):
+    """expect {문자: 볼륨 일련번호}(작업 때 기록) 중 지금 그 문자에 다른 디스크가 붙은 첫 문자, 없으면 None.
+    기록이 없거나(옛 기록) 지금 그 문자가 없거나 일련번호를 모르면 판정하지 않는다(다른 검사가 맡는다)."""
+    for L, want in (expect or {}).items():
+        if not want:
+            continue
+        d = _find_drive(drives, L)
+        if d is None:
+            continue
+        now = _serial_of(d)
+        if now and now != want:
+            return L
+    return None
+
+
 def _no_bin(d):
     """휴지통이 없다고 명시된 위치인가(필드가 없는 옛 dict 는 있다고 본다)."""
     return isinstance(d, dict) and d.get("has_bin") is False
@@ -572,6 +599,8 @@ class JobQueue:
         self._seq = 0
         self._last_save = 0.0
         self._dirty = False
+        self._deleting = threading.Event()     # 원본 삭제 단계(취소를 받지 않는다) 진행 중
+        self.delete_grace = 120.0              # stop() 이 그 단계가 끝나길 더 기다리는 최대 초
         self.hook_errors = 0
         self.save_error = None
         self._path = os.path.join(data_dir, "jobs.json")
@@ -602,6 +631,12 @@ class JobQueue:
         t = self._thread
         if t is not None:
             t.join(timeout)
+            if t.is_alive() and self._deleting.is_set():
+                # 원본을 지우는 중에 끊으면 한 항목이 원본·대상에 나뉜다 — 그 단계는 끝까지 기다린다(상한 있음)
+                deadline = time.monotonic() + max(0.0, float(self.delete_grace))
+                while t.is_alive() and self._deleting.is_set() and time.monotonic() < deadline:
+                    t.join(0.2)
+                t.join(1.0)                    # 그 항목의 기록(done 등)까지 남길 짧은 여유
         self._save(force=True)
         return not (t is not None and t.is_alive())
 
@@ -615,6 +650,10 @@ class JobQueue:
         with self._lock:
             ids = list(reversed(self._order))[:max(0, int(limit))]
             return [self._public(self._jobs[i]) for i in ids]
+
+    def deleting(self):
+        """원본 삭제 단계(취소를 받지 않는다)가 진행 중인가 — stop() 이 그 단계가 끝나길 기다린다."""
+        return self._deleting.is_set()
 
     def active(self):
         with self._lock:
@@ -677,9 +716,17 @@ class JobQueue:
         title = "휴지통으로 보내기 · " + self._items_title(plan)
         return self._enqueue("recycle", "recycle", title, _items=plan, bytes_total=tb, files_total=len(plan))
 
-    def submit_delete(self, items):
-        """영구 삭제(복구 불가). 휴지통이 없는 위치용 — 또는 사용자가 명시적으로 고른 경우. 보호 경로는 거부."""
+    def submit_delete(self, items, limits=None):
+        """영구 삭제(복구 불가). 휴지통이 없는 위치용 — 또는 사용자가 명시적으로 고른 경우. 보호 경로는 거부.
+
+        limits: {경로: (바이트, 파일 수)} — 사용자가 확인한 양. 실행 때 디스크에 그보다 많으면 그 항목은 지우지 않는다
+        (큐에서 기다리는 동안 동료가 파일을 넣은 경우 — 동의한 것보다 더 지우지 않는다)."""
         specs = self._parse_items(items)
+        lim = {}
+        if isinstance(limits, dict):
+            for k, v in limits.items():
+                if isinstance(k, str) and k and isinstance(v, (list, tuple)) and len(v) == 2:
+                    lim[_key(self._norm(k))] = (int(v[0]), int(v[1]))
         drives = self._drives()
         blocked = []
         for sp in specs:
@@ -698,7 +745,11 @@ class JobQueue:
                               {"blocked": [{"path": self._spec_label(sp), "reason": safety.R_UNKNOWN}]})
             est = self._hook_size(self._spec_label(sp))
             b, f = est if est else (0, 0)
-            plan.append(dict(sp, bytes=b, files=f, src_letter=_letter_of(hit[0]), done=False))
+            ent = dict(sp, bytes=b, files=f, src_letter=_letter_of(hit[0]), done=False)
+            cap = lim.get(_key(sp["src"])) if sp["kind"] == "path" else None
+            if cap is not None:
+                ent["limit_b"], ent["limit_f"] = cap
+            plan.append(ent)
             tb += b
         title = "영구 삭제 · " + self._items_title(plan)
         return self._enqueue("delete", "delete", title, _items=plan, bytes_total=tb, files_total=len(plan))
@@ -815,7 +866,8 @@ class JobQueue:
             raise OpError("invalid", "작업 함수가 올바르지 않아요.")
         return self._enqueue(str(type), "task", str(title), _fn=fn)
 
-    def undo(self, job_id):
+    def undo(self, job_id, confirm=True):
+        """confirm=False: 휴지통 없는 곳의 복사본을 지우는(영구 삭제) 되돌리기는 need_confirm 으로 거절한다(HTTP 경로)."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -824,7 +876,7 @@ class JobQueue:
                     or not job.get("undoable") or job.get("_undo_pending")):
                 raise OpError("not_undoable", "되돌릴 수 없는 작업이에요.")
         if job.get("type") == "copy":
-            return self._undo_copy(job_id, job)
+            return self._undo_copy(job_id, job, confirm=confirm)
         with self._lock:
             todo = [(i, it) for i, it in enumerate(job.get("_items") or [])
                     if it.get("done") and not it.get("undone")]
@@ -834,6 +886,11 @@ class JobQueue:
         if not todo:
             raise OpError("not_undoable", "되돌릴 항목이 없어요.")
         drives = self._drives()
+        expect = self._undo_expect(job, [T] + [it.get("src_letter") for _i, it in todo])
+        bad = _serial_mismatch(drives, expect)
+        if bad:
+            raise OpError("drive_changed", R_DRIVE_CHANGED % _disp(_find_drive(drives, bad) or {"letter": bad}),
+                          {"target": bad})
         plan, blocked = [], []
         need = collections.Counter()
         for idx, it in todo:
@@ -882,12 +939,18 @@ class JobQueue:
             if job.get("_undo_pending") or not job.get("undoable"):
                 raise OpError("not_undoable", "이미 되돌리는 중이에요.")
             nid = self._enqueue("undo", "move", title, _items=plan, _target=None, _verify=verify,
-                                undo_of=job_id, bytes_total=sum(x["bytes"] for x in plan),
+                                undo_of=job_id, _expect=expect, bytes_total=sum(x["bytes"] for x in plan),
                                 files_total=sum(x["files"] for x in plan))
             job["_undo_pending"] = nid
             job["undoable"] = False
         self._save(force=True)
         return nid
+
+    @staticmethod
+    def _undo_expect(job, letters):
+        """되돌리기가 기대하는 {문자: 일련번호} — 원 작업이 실행될 때 기록한 것(_serials) 중 letters 만."""
+        rec = job.get("_serials") or {}
+        return {L: rec[L] for L in letters if L and rec.get(L)}
 
     @staticmethod
     def _copy_undo_items(job):
@@ -905,7 +968,7 @@ class JobQueue:
             return any(it.get("done") and not it.get("undone") for it in job.get("_items") or [])
         return False
 
-    def _undo_copy(self, job_id, job):
+    def _undo_copy(self, job_id, job, confirm=True):
         """복사 되돌리기 = 그 작업이 만든 파일·폴더만 지운다(휴지통이 있으면 휴지통, 없으면 영구 삭제).
         지우기 직전에 복사본이 그대로인지, 원본이 아직 있는지 다시 본다 — 아니면 그 복사본은 남긴다."""
         drives = self._drives()
@@ -918,6 +981,9 @@ class JobQueue:
         tdrive = _find_drive(drives, T)
         if tdrive is None or tdrive.get("connected") is False:
             raise OpError("unknown_drive", "복사한 위치를 찾을 수 없거나 연결되어 있지 않아요.", {"target": T})
+        expect = self._undo_expect(job, [T])
+        if _serial_mismatch(drives, expect):
+            raise OpError("drive_changed", R_DRIVE_CHANGED % _disp(tdrive), {"target": T})
         blocked = []
         for _i, it in todo:
             top = it.get("dst_final") or it.get("final_dir")
@@ -928,13 +994,16 @@ class JobQueue:
         if blocked:
             raise OpError("protected", "보호된 경로가 있어 되돌릴 수 없어요.", {"blocked": blocked})
         permanent = _no_bin(tdrive)
+        if permanent and not confirm:
+            raise OpError("need_confirm", "%s 에는 휴지통이 없어서 복사본이 영구 삭제돼요. 확인한 뒤 다시 요청해 주세요."
+                          % _disp(tdrive), {"permanent": True, "target": T})
         plan = [{"kind": "uncopy", "orig": i, "bytes": int(it.get("bytes") or 0), "done": False,
                  "label": it.get("dst_final") or it.get("final_dir") or self._item_path(it)} for i, it in todo]
         with self._lock:
             if job.get("_undo_pending") or not job.get("undoable"):
                 raise OpError("not_undoable", "이미 되돌리는 중이에요.")
             nid = self._enqueue("undo", "uncopy", title, _items=plan, _target=T, undo_of=job_id,
-                                permanent=permanent, bytes_total=sum(x["bytes"] for x in plan),
+                                _expect=expect, permanent=permanent, bytes_total=sum(x["bytes"] for x in plan),
                                 files_total=len(plan))
             job["_undo_pending"] = nid
             job["undoable"] = False
@@ -1353,12 +1422,11 @@ class JobQueue:
                             msg += " 대상에 일부 사본이 남았을 수 있어요: %s" % it["dst_final"]
                             break
                 elif j.get("_kind") == "move":
-                    msg += " 원본은 지워지지 않았어요."
-                    for it in j.get("_items") or []:
-                        if it.get("dst_final") and not it.get("_finished"):
-                            msg += " 대상에 일부 사본이 남았을 수 있어요: %s" % it["dst_final"]
-                            break
+                    msg += self._interrupted_move_msg(j)
                 j["status"] = "failed"
+                if j.get("_kind") == "move" and any(it.get("done") or it.get("partial")
+                                                    for it in j.get("_items") or []):
+                    j["status"] = "partial"         # 끝난 항목은 옮겨졌다 — '실패'가 아니다(되돌리기도 남는다)
                 j["finished_at"] = now
                 j["message"] = msg
             self._jobs[j["id"]] = j
@@ -1375,6 +1443,37 @@ class JobQueue:
             if j.get("type") in ("move", "copy"):
                 j["undoable"] = self._is_undoable(j)
         self._trim()
+
+    @staticmethod
+    def _interrupted_move_msg(j):
+        """앱이 이동 도중 종료됐을 때의 안내 — 저장된 항목 상태로 지어낸다(원본이 그대로라고 단정하지 않는다)."""
+        items = j.get("_items") or []
+        undo = j.get("type") == "undo"
+        done = [it for it in items if it.get("done")]
+        part = [it for it in items if it.get("partial") and not it.get("done")]
+        live = [it for it in items if not it.get("_finished")]
+        split = [it for it in live if it.get("deleting")]
+        copying = [it for it in live if not it.get("deleting") and (it.get("dst_final") or it.get("final_dir"))]
+
+        def where(it):
+            return it.get("dst_final") or it.get("final_dir") or JobQueue._item_path(it) or "?"
+
+        parts = []
+        if done:
+            parts.append("끝난 %d개는 %s(원래 위치에서는 지워졌어요)." % (len(done), "원래 위치로 되돌렸어요" if undo
+                                                                     else "옮겨졌어요"))
+        if part:
+            parts.append("%d개는 일부만 옮겨졌어요." % len(part))
+        for it in split:
+            parts.append("%s 은 원본을 지우던 중이었어요 — 원래 위치와 %s 에 나뉘어 있을 수 있으니 "
+                         "어느 쪽도 지우지 말고 확인해 주세요." % (JobQueue._item_path(it), where(it)))
+        if not (done or part or split):
+            parts.append("원본은 지워지지 않았어요.")
+        elif any(not it.get("deleting") for it in live):
+            parts.append("나머지 항목의 원본은 지워지지 않았어요.")
+        for it in copying[:1]:
+            parts.append("대상에 일부 사본이 남았을 수 있어요: %s" % where(it))
+        return " " + " ".join(parts)
 
     # ── 일꾼 ──
     def _worker(self):
@@ -1570,6 +1669,15 @@ class JobQueue:
         verify = job.get("_verify", "quick")
         copy = job.get("_mode") == "copy"
         drives = self._drives()
+        if job.get("type") == "undo":
+            bad = _serial_mismatch(drives, job.get("_expect"))
+            if bad:
+                return self._fail_all(job, items, R_DRIVE_CHANGED % _disp(_find_drive(drives, bad) or {"letter": bad}))
+        else:
+            letters = {job.get("_target")} | {it.get("src_letter") for it in items}
+            with self._lock:                    # 되돌리기가 '같은 디스크인가'를 확인할 수 있게 지금 일련번호를 남긴다
+                job["_serials"] = {L: _serial_of(_find_drive(drives, L)) for L in letters
+                                   if L and _serial_of(_find_drive(drives, L))}
         need = collections.Counter()
         for it in items:
             need[it.get("dst_letter") or job.get("_target")] += int(it.get("bytes") or 0)
@@ -1616,6 +1724,7 @@ class JobQueue:
                 self._compact(it)
                 continue
             it["_finished"] = True
+            deleted = it.pop("deleting", False)
             copystat_warn += res.get("warn", 0)
             if res.get("stop"):
                 stop_reason = res["stop"]
@@ -1626,7 +1735,9 @@ class JobQueue:
             except Exception:
                 pass
             self._compact(it)
-            self._save()
+            # 원본을 지운 항목은 바로 디스크에 남긴다 — 다음 항목을 복사하는 동안 앱이 죽어도 기록이
+            # '원본은 그대로'라고 거짓말하지 않고, 끝난 항목은 되돌릴 수 있게.
+            self._save(force=deleted)
         devlost = stop_reason == R_DEVLOST
         status = self._final_status(items, cancelled)
         n_ok = sum(1 for it in items if it.get("done"))
@@ -1651,7 +1762,9 @@ class JobQueue:
             msg = ("복사하지 못했어요." if copy else "옮기지 못했어요.") + (" " + errs[0] if errs else "")
         if devlost and R_DEVLOST not in msg:
             msg = R_DEVLOST + " " + msg
-        if devlost:
+        if devlost and not copy and any(it.get("partial") for it in items):
+            msg += " 다 옮기지 못한 항목은 원래 위치와 대상에 나뉘어 있고, 일부 파일은 양쪽에 다 있을 수 있어요."
+        elif devlost:
             msg += " 원본은 그대로예요."
         if copystat_warn:
             msg += " (수정 시각을 %s 못한 파일 %d개)" % ("복사하지" if copy else "옮기지", copystat_warn)
@@ -1715,7 +1828,7 @@ class JobQueue:
             return self._item_fail(job, it, R_OVERLAP)
         with self._lock:
             it["dst_final"] = dst
-        self._save()
+        self._save(force=True)                # 중단되면 다음 실행이 '대상에 사본이 남았을 수 있는 곳'을 알려 준다
         smod = safety.mod_for(src)
         if is_dir:
             files, dirs, skipped = _scan_tree(src, smod)
@@ -1730,7 +1843,7 @@ class JobQueue:
             return self._item_fail(job, it, res["fail"], stop=res.get("stop"), warn=res["warn"])
         if copy:
             return self._copy_done_path(job, it, src, dst, n, is_dir, res)
-        complete = not os.path.lexists(_lp(src))
+        complete = not res.get("stop") and not os.path.lexists(_lp(src))   # 장치가 빠져도 '원본 없음'으로 보인다
         moved_bytes = res["moved_bytes"]
         self._account(job, it, moved_bytes)
         if complete:
@@ -1746,7 +1859,7 @@ class JobQueue:
         else:
             it.pop("dst_final", None)
             self._result(job, src, False, error=self._first_reason(res["kept"]))
-        return {"warn": res["warn"]}
+        return {"warn": res["warn"], "stop": res.get("stop")}
 
     def _copy_done_path(self, job, it, src, dst, n, is_dir, res):
         """복사 결과 기록 — 되돌리기용으로 만든 파일(서명 포함)·폴더를 남긴다."""
@@ -1818,7 +1931,7 @@ class JobQueue:
             for i, d in dests.items():
                 fin[i][1] = d
             it["members_final"] = fin
-        self._save()
+        self._save(force=True)
         pairs = [(s, dests[i], size) for i, s, size in good]
         res = self._transfer(ctx, job, it, pairs, [], kept, verify, group_base=it.get("base_dir"), copy=copy)
         dest_label = mod.join(final_dir, mod.basename(label))
@@ -1853,7 +1966,7 @@ class JobQueue:
                 self._hook("on_added", final_dir)
         else:
             self._result(job, label, False, error=self._first_reason(res["kept"]))
-        return {"warn": res["warn"]}
+        return {"warn": res["warn"], "stop": res.get("stop")}
 
     def _item_fail(self, job, it, reason, stop=None, warn=0):
         self._result(job, self._item_path(it), False, error=reason)
@@ -2001,40 +2114,24 @@ class JobQueue:
             return self._finish_copy(ctx, out, copied, created, dir_pairs, dstat, kept, warn,
                                      base_done + item_bytes)
         # 여기부터 원본 삭제 — 이 항목의 복사본은 전부 검증됐다. 취소는 받지 않는다(끝까지 정리).
-        moved = []
-        for s, d, size, sig, _dmt in copied:
-            why = None
-            try:
-                st = os.stat(_lp(s))
-            except FileNotFoundError:
-                moved.append((s, d, size))          # 원본이 이미 없다 → 사본이 유일본, 남긴다
-                continue
-            except OSError as e:
-                why = _err_ko(e)
-            else:
-                if (st.st_size, st.st_mtime_ns) != sig:
-                    why = R_CHANGED
-                else:
-                    try:
-                        _remove_file(s)
-                        moved.append((s, d, size))
-                        continue
-                    except FileNotFoundError:
-                        moved.append((s, d, size))
-                        continue
-                    except OSError as e:
-                        why = _err_ko(e)
-            kept.append((s, why))
-            if os.path.lexists(_lp(s)):
-                _discard_file(d)                    # 원본이 남았으니 사본은 거둔다(한 곳에만 있게)
-            else:
-                moved.append((s, d, size))
+        # 시작 전에 기록을 디스크에 남긴다: 이 뒤에 앱이 죽으면 다음 실행이 '원본 일부가 이미 지워졌을 수
+        # 있다'를 알아야 한다(앞서 끝난 항목의 done 도 함께 남는다).
+        with self._lock:
+            it["deleting"] = True
+        self._deleting.set()
+        try:
+            self._save(force=True)
+            moved, src_lost = self._delete_sources(it, copied, kept)
+        finally:
+            self._deleting.clear()
+        if src_lost:
+            out["stop"] = R_DEVLOST
         for sd, _dd in reversed(dir_pairs):
             try:
                 os.rmdir(_lp(sd))
             except OSError:
                 pass
-        if group_base:
+        if group_base and not src_lost:
             gmod = safety.mod_for(group_base)
             gk = group_base.casefold()
             parents = sorted({gmod.dirname(s) for s, _d, _z in moved}, key=len, reverse=True)
@@ -2057,6 +2154,80 @@ class JobQueue:
         ctx._set_bytes(base_done + item_bytes)
         out.update(moved=moved, moved_bytes=sum(z for _s, _d, z in moved), kept=kept, warn=warn)
         return out
+
+    def _source_gone(self, path):
+        """원본 장치가 사라졌는가(빠진 USB·끊긴 NAS) — 목록에서 없어졌거나 루트에 닿지 않으면 True."""
+        hit = safety.drive_of(path, self._drives())
+        if hit is None:
+            return True
+        try:
+            return not winapi.path_alive(safety._drive_root(hit[0]))
+        except Exception:
+            return False
+
+    def _delete_sources(self, it, copied, kept):
+        """검증된 사본의 원본을 지운다 → (moved[(s,d,size)], 원본 장치가 끊겼는가).
+
+        원본이 '없다'는 결과가 장치가 빠져서 나온 것일 수 있다(Windows 는 빠진 장치에도 '경로 없음'을 준다).
+        그래서 이상이 보이면 원본 장치가 살아 있는지 한 번 본다. 끊겼으면 그 파일과 남은 파일은 모두
+        '옮기지 못함(R_DEVLOST)'으로 남기고 사본도 거두지 않는다 — 원본이 장치에 그대로 있을 수 있어서
+        양쪽에 둘 다 있는 쪽이 안전하다(지워졌다고 세면 해제 용량·기록이 거짓이 된다)."""
+        moved = []
+        lost = False
+
+        def gone():                                  # 이상이 보일 때만 묻는다(정상 경로에선 0회)
+            nonlocal lost
+            if not lost:
+                lost = self._source_gone(it.get("src") or it.get("label") or copied[0][0])
+            return lost
+
+        for s, d, size, sig, _dmt in copied:
+            if lost:
+                kept.append((s, R_DEVLOST))
+                continue
+            why = None
+            try:
+                st = os.stat(_lp(s))
+            except FileNotFoundError:
+                if gone():
+                    kept.append((s, R_DEVLOST))
+                    continue
+                moved.append((s, d, size))          # 원본이 이미 없다 → 사본이 유일본, 남긴다
+                continue
+            except OSError as e:
+                if _is_devlost(e) or gone():
+                    lost = True
+                    kept.append((s, R_DEVLOST))
+                    continue
+                why = _err_ko(e)
+            else:
+                if (st.st_size, st.st_mtime_ns) != sig:
+                    why = R_CHANGED
+                else:
+                    try:
+                        _remove_file(s)
+                        moved.append((s, d, size))
+                        continue
+                    except FileNotFoundError:
+                        if gone():
+                            kept.append((s, R_DEVLOST))
+                            continue
+                        moved.append((s, d, size))
+                        continue
+                    except OSError as e:
+                        if _is_devlost(e) or gone():
+                            lost = True
+                            kept.append((s, R_DEVLOST))
+                            continue
+                        why = _err_ko(e)
+            kept.append((s, why))
+            if os.path.lexists(_lp(s)):
+                _discard_file(d)                    # 원본이 남았으니 사본은 거둔다(한 곳에만 있게)
+            elif gone():
+                kept[-1] = (s, R_DEVLOST)           # 원본이 안 보이는 건 장치가 빠져서다 — 사본은 남긴다
+            else:
+                moved.append((s, d, size))
+        return moved, bool(lost)
 
     @staticmethod
     def _apply_dir_times(dir_pairs, dstat):
@@ -2376,6 +2547,9 @@ class JobQueue:
                     files.append((p, st.st_size))
                 else:
                     kept.append((p, R_NOTREG))
+            if "limit_b" in it and (sum(z for _p, z in files) > it["limit_b"] or len(files) > it["limit_f"]):
+                self._result(job, label, False, error=R_GREW)      # 확인한 뒤 늘었다 — 한 파일도 지우지 않는다
+                continue
             with self._lock:
                 job["files_total"] += len(files) - 1
                 job["bytes_total"] += sum(z for _p, z in files) - int(it.get("bytes") or 0)
@@ -2464,6 +2638,8 @@ class JobQueue:
             return self._fail_all(job, items, "원래 복사 작업의 기록을 찾을 수 없어요.")
         if tdrive is None or tdrive.get("connected") is False:
             return self._fail_all(job, items, "복사한 위치를 찾을 수 없거나 연결되어 있지 않아요.")
+        if _serial_mismatch(drives, job.get("_expect")):
+            return self._fail_all(job, items, R_DRIVE_CHANGED % _disp(tdrive))
         use_bin = not _no_bin(tdrive)
         oitems = orig.get("_items") or []
         prepared, total = [], 0

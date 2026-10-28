@@ -930,7 +930,11 @@ function create(container, ctx) {
       total += ps.length; bytes += b;
       return Object.assign({}, g, { projects: ps, count: ps.length, bytes: b, cat_bytes: cb, subtitle: `프로젝트 ${ps.length}개` });
     }).filter(g => g.count);
-    if (S.group === 'client') d.groups.sort((a, b) => b.bytes - a.bytes);
+    // 서버(group_projects)와 같은 순서: 미분류는 맨 뒤 → 용량 큰 순 → 이름
+    if (S.group === 'client') {
+      const fold = s => String(s || '').normalize('NFKC').toLowerCase();
+      d.groups.sort((a, b) => ((a.title === '미분류') - (b.title === '미분류')) || (b.bytes - a.bytes) || (fold(a.title) < fold(b.title) ? -1 : fold(a.title) > fold(b.title) ? 1 : 0));
+    }
     d.total = total; d.total_bytes = bytes;
   }
 
@@ -1652,11 +1656,17 @@ function create(container, ctx) {
     if (p.newest) row('최근 수정', h('span', { class: 'num', text: fmtTs(p.newest) }), h('span', { class: 'dim', text: fmtAgo(p.newest) }));
     box.replaceChildren(h('h4', { text: '정보' }), dl);
   }
+  /* 0 이 아닌 몫은 「0%」 로 보이지 않게(트리맵과 같은 표기) */
+  function compPct(v, t) {
+    if (!t) return '';
+    const pc = v / t * 100;
+    return pc > 0 && pc < 1 ? '1% 미만' : pc >= 99.5 && v < t ? '99%' : Math.round(pc) + '%';
+  }
   function fillComp(box, p, children) {
     const t = p.size || 0;
     const lg = h('div', { class: 'ps-legend' });
     (p.cat_bytes || []).map((v, i) => [i, v || 0]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).forEach(([i, v]) => {
-      lg.append(h('div', { style: { '--sc': catVar(i) } }, h('i'), h('span', { text: catName(i) }), h('b', { class: 'num', text: fmtSize(v) }), h('span', { class: 'num', style: { color: 'var(--text3)' }, text: t ? Math.round(v / t * 100) + '%' : '' })));
+      lg.append(h('div', { style: { '--sc': catVar(i) } }, h('i'), h('span', { text: catName(i) }), h('b', { class: 'num', text: fmtSize(v) }), h('span', { class: 'num', style: { color: 'var(--text3)' }, text: compPct(v, t) })));
     });
     const kids = h('div', { class: 'ps-kids' });
     if (children === null) for (let i = 0; i < 3; i++) kids.append(h('div', { class: 'ps-sk', style: { height: '26px', margin: '3px 0' } }));

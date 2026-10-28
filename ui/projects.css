@@ -163,7 +163,7 @@
 
 .po-fb {
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-  color: var(--text4); font-size: 11.5px;
+  color: var(--text-hint); font-size: 11.5px;
   background: radial-gradient(120% 90% at 30% 0%, color-mix(in srgb, var(--pc-tint, var(--c1)) 9%, transparent), transparent 62%), var(--card-hi);
 }
 .po-fb svg { width: 24px; height: 24px; color: color-mix(in srgb, var(--pc-tint, var(--c1)) 55%, var(--text3)); opacity: .8; }
@@ -493,7 +493,7 @@
 .og-folder:nth-child(odd) { background: rgba(255, 255, 255, .02); }
 .og-folder .p { font-size: 12.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
 .og-folder .p bdi { direction: ltr; unicode-bidi: isolate; }
-.og-empty { font-size: 12.5px; color: var(--text4); padding: 8px 2px; }
+.og-empty { font-size: 12.5px; color: var(--text-hint); padding: 8px 2px; }
 
 /* 좁은 화면 */
 @container (max-width: 860px) {

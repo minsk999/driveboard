@@ -992,6 +992,11 @@ class CopyTests(DeviceBase):
         self.assertTrue(all(os.path.exists(f) for f in frames))
         self.assertEqual(j["added"], {self.NK: sum(1000 + i for i in range(1, 6))})
         # 되돌리기 → NAS 는 휴지통이 없어 영구 삭제, 원본은 그대로
+        with self.assertRaises(ops.OpError) as cm:           # HTTP 경로(confirm=False)는 확인부터 받는다
+            self.q.undo(j["id"], confirm=False)
+        self.assertEqual((cm.exception.code, cm.exception.extra.get("permanent")), ("need_confirm", True))
+        self.assertTrue(self.q.get(j["id"])["undoable"])       # 거절해도 되돌리기는 남는다
+        self.assertTrue(os.path.isdir(dseq))
         u = self.wait(self.q.undo(j["id"]))
         self.assertEqual(u["status"], "done", u)
         self.assertTrue(u["permanent"])
@@ -1326,6 +1331,26 @@ class NoBinAndDeleteTests(DeviceBase):
             self.q.undo(jid)
         self.assertEqual(cm.exception.code, "not_undoable")
 
+    def test_delete_stops_item_that_grew_after_confirm(self):
+        # 확인한 양(limits)보다 실행 때 더 있으면 그 항목은 한 파일도 지우지 않는다 — 큐에서 기다리는 동안 늘어난 경우
+        top = os.path.join(self.U, "Grew")
+        a = mkfile(os.path.join(top, "a.mov"), 1000)
+        other = mkfile(os.path.join(self.U, "ok.mov"), 50)
+        late = mkfile(os.path.join(top, "late.mov"), 10)          # 확인 뒤 동료가 넣은 파일
+        j = self.wait(self.q.submit_delete([top, other], limits={top: (1000, 1), other: (50, 1)}))
+        self.assertEqual(j["status"], "partial", j)
+        res = {r["path"]: r for r in j["results"]}
+        self.assertFalse(res[top]["ok"])
+        self.assertEqual(res[top]["error"], ops.R_GREW)
+        self.assertTrue(os.path.exists(a) and os.path.exists(late))
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(j["freed"], {"U": 50})
+        # 같거나 줄었으면 그대로 지운다
+        os.remove(late)
+        j = self.wait(self.q.submit_delete([top], limits={top: (1000, 1)}))
+        self.assertEqual(j["status"], "done", j)
+        self.assertFalse(os.path.exists(top))
+
     def test_delete_refusals(self):
         win = mkfile(os.path.join(self.C, "Windows", "x.dll"), 5)
         for p in (self.U, self.NAS, os.path.join(self.C, "Windows"), os.path.join(self.NAS, "@eaDir"),
@@ -1494,6 +1519,215 @@ class DeviceLossTests(DeviceBase):
         self.assertLessEqual(max(sizes), 1 << 20)
         self.assertTrue(speeds, "속도가 한 번도 보고되지 않았어요")
         self.assertTrue(all(e is not None and e >= 0 for _b, e in speeds))
+
+
+
+class UndoDiskIdentityTests(Base):
+    """되돌리기는 같은 문자에 '다른 디스크'가 붙어 있으면 그 디스크의 파일을 옮기거나 지우지 않는다."""
+
+    def swap_disk(self, letter, serial="DEADBEEF"):
+        d = os.path.join(self.root, letter)
+        os.rename(d, os.path.join(self.tmp, "unplugged-" + letter))
+        os.makedirs(d)
+        with open(os.path.join(d, "_drive.json"), "w") as f:
+            json.dump({"label": "OTHER", "kind": "hdd", "total": 100 * GiB, "serial": serial}, f)
+        winapi.invalidate_usage()
+        return d
+
+    def test_move_undo_refused_on_swapped_disk(self):
+        src = os.path.join(self.D, "proj")
+        mkfile(os.path.join(src, "mine.mov"), 1000)
+        jid = self.q.submit_move([src], "C")
+        self.assertEqual(self.wait(jid)["status"], "done")
+        C = self.swap_disk("C")
+        theirs = mkfile(os.path.join(C, "proj", "colleague_master.mov"), 5000)
+        with self.assertRaises(ops.OpError) as cm:
+            self.q.undo(jid)
+        self.assertEqual(cm.exception.code, "drive_changed")
+        self.assertIn("C:", cm.exception.message if hasattr(cm.exception, "message") else str(cm.exception))
+        self.assertTrue(os.path.exists(theirs))
+        self.assertFalse(os.path.exists(src))
+        self.assertTrue(self.q.get(jid)["undoable"])          # 원래 디스크를 다시 꽂으면 되돌릴 수 있다
+
+    def test_move_undo_checked_again_when_it_runs_and_after_restart(self):
+        src = os.path.join(self.D, "proj")
+        mkfile(os.path.join(src, "mine.mov"), 1000)
+        jid = self.q.submit_move([src], "C")
+        self.wait(jid)
+        self.q.stop(5)
+        self.q = self.make_queue()                            # 재시작: 기록된 일련번호가 남아 있어야 한다
+        uid = self.q.undo(jid)                                # 아직 일꾼을 시작하지 않았다
+        C = self.swap_disk("C")
+        theirs = mkfile(os.path.join(C, "proj", "colleague_master.mov"), 5000)
+        self.q.start()
+        u = self.wait(uid)
+        self.assertEqual(u["status"], "failed", u)
+        self.assertIn("다른 디스크", u["message"])
+        self.assertTrue(os.path.exists(theirs))
+        self.assertFalse(os.path.exists(src))
+
+    def test_move_undo_same_disk_still_works(self):
+        src = os.path.join(self.D, "proj")
+        mkfile(os.path.join(src, "mine.mov"), 1000)
+        jid = self.q.submit_move([src], "C")
+        self.wait(jid)
+        u = self.wait(self.q.undo(jid))
+        self.assertEqual(u["status"], "done", u)
+        self.assertTrue(os.path.exists(os.path.join(src, "mine.mov")))
+
+    def test_copy_undo_refused_on_swapped_disk(self):
+        src = mkfile(os.path.join(self.D, "p", "clip.mov"), 1000, mtime=OLD)
+        jid = self.q.submit_move([src], "C", mode="copy")
+        self.assertEqual(self.wait(jid)["status"], "done")
+        C = self.swap_disk("C")
+        theirs = mkfile(os.path.join(C, "p", "clip.mov"), 1000, mtime=OLD)
+        with self.assertRaises(ops.OpError) as cm:
+            self.q.undo(jid)
+        self.assertEqual(cm.exception.code, "drive_changed")
+        self.assertTrue(os.path.exists(theirs))
+
+
+class InterruptedMoveHistoryTests(Base):
+    """이동 도중 앱이 죽거나 창이 닫혔을 때 — 기록이 '원본은 그대로'라고 거짓말하지 않는다."""
+
+    def reload(self, snap):
+        home2 = os.path.join(self.tmp, "home-%d" % time.monotonic_ns())
+        os.makedirs(home2)
+        with open(os.path.join(home2, "jobs.json"), "w", encoding="utf-8") as f:
+            f.write(snap)
+        drives = winapi.list_drives
+        return ops.JobQueue(home2, drives, lambda p: safety.check(p, drives()), hooks={})
+
+    def snapshot(self):
+        with open(os.path.join(self.home, "jobs.json"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_crash_while_copying_second_item_keeps_first_done_and_undoable(self):
+        small = mkfile(os.path.join(self.D, "a", "small.mov"), 1000)
+        big = mkfile(os.path.join(self.D, "b", "big.mov"), 300_000)
+        self.q.chunk_size = 64 * 1024
+        gate, hit = threading.Event(), threading.Event()
+        real = ops._write
+
+        def w(f, data):
+            if "big.mov" in f.name:
+                hit.set()
+                gate.wait(10)
+            return real(f, data)
+        with mock.patch.object(ops, "_write", w):
+            jid = self.q.submit_move([small, big], "C")
+            self.assertTrue(hit.wait(10))
+            time.sleep(0.05)
+            snap = self.snapshot()                            # 지금 죽었다면 디스크에 남은 기록
+            gate.set()
+            self.wait(jid)
+        self.assertFalse(os.path.exists(small))               # 첫 항목 원본은 이미 지워졌다
+        persisted = json.loads(snap)["jobs"][-1]
+        self.assertEqual([bool(it.get("done")) for it in persisted["_items"]], [True, False])
+        j = self.reload(snap).get(jid)
+        self.assertEqual(j["status"], "partial", j)
+        self.assertTrue(j["undoable"])
+        self.assertIn("끝난 1개는 옮겨졌어요", j["message"])
+        self.assertNotIn("중단됐어요. 원본은 지워지지 않았어요", j["message"])
+        self.assertIn("대상에 일부 사본이 남았을 수 있어요", j["message"])
+
+    def test_crash_during_source_deletion_says_item_may_be_split(self):
+        top = os.path.join(self.D, "proj")
+        for i in range(5):
+            mkfile(os.path.join(top, "f%d.mov" % i), 1000)
+        gate, hit = threading.Event(), threading.Event()
+        real = ops._remove_file
+        n = {"i": 0}
+
+        def rm(p):
+            n["i"] += 1
+            if n["i"] == 3:
+                hit.set()
+                gate.wait(10)
+            return real(p)
+        with mock.patch.object(ops, "_remove_file", rm):
+            jid = self.q.submit_move([top], "C")
+            self.assertTrue(hit.wait(10))
+            snap = self.snapshot()
+            gate.set()
+            self.wait(jid)
+        j = self.reload(snap).get(jid)
+        self.assertEqual(j["status"], "failed", j)
+        self.assertFalse(j["undoable"])
+        self.assertIn("원본을 지우던 중", j["message"])
+        self.assertIn(os.path.join(self.C, "proj"), j["message"])
+        self.assertNotIn("원본은 지워지지 않았어요", j["message"])
+
+    def test_interrupted_before_any_deletion_keeps_old_wording(self):
+        big = mkfile(os.path.join(self.D, "b", "big.mov"), 300_000)
+        self.q.chunk_size = 64 * 1024
+        gate, hit = threading.Event(), threading.Event()
+        real = ops._write
+
+        def w(f, data):
+            hit.set()
+            gate.wait(10)
+            return real(f, data)
+        with mock.patch.object(ops, "_write", w):
+            jid = self.q.submit_move([big], "C")
+            self.assertTrue(hit.wait(10))
+            snap = self.snapshot()
+            gate.set()
+            self.wait(jid)
+        j = self.reload(snap).get(jid)
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("원본은 지워지지 않았어요.", j["message"])
+        self.assertIn("대상에 일부 사본이 남았을 수 있어요: " + os.path.join(self.C, "b", "big.mov"), j["message"])
+
+    def test_stop_waits_for_source_deletion_phase(self):
+        top = os.path.join(self.D, "proj")
+        for i in range(30):
+            mkfile(os.path.join(top, "f%02d.mov" % i), 1000)
+        real = ops._remove_file
+
+        def slow(p):
+            time.sleep(0.03)
+            return real(p)
+        with mock.patch.object(ops, "_remove_file", slow):
+            jid = self.q.submit_move([top], "C")
+            t0 = time.time()
+            while time.time() - t0 < 10 and len(os.listdir(top)) >= 30:
+                time.sleep(0.005)
+            self.q.stop(timeout=0.05)                         # 창 닫기 → 짧은 타임아웃
+        self.assertFalse(os.path.exists(top) and os.listdir(top), "원본 삭제가 중간에 끊겼어요")
+        self.assertEqual(len(os.listdir(os.path.join(self.C, "proj"))), 30)
+        j = self.reload(self.snapshot()).get(jid)
+        self.assertEqual(j["status"], "done", j)
+        self.assertTrue(j["undoable"])
+
+
+class SourceUnplugDuringDeleteTests(DeviceBase):
+    def test_source_unplugged_while_deleting_is_not_counted_as_moved(self):
+        top = os.path.join(self.U, "shoot")
+        for i in range(5):
+            mkfile(os.path.join(top, "c%d.mov" % i), 1000)
+        gone = os.path.join(self.tmp, "unplugged-U")
+        real = ops._remove_file
+        n = {"i": 0}
+
+        def rm(p):
+            n["i"] += 1
+            if n["i"] == 2:
+                os.rename(self.U, gone)                       # USB 가 빠졌다 — Windows 는 '경로 없음'을 준다
+            if not os.path.exists(os.path.dirname(p)):
+                raise FileNotFoundError(errno.ENOENT, "The system cannot find the path specified", p)
+            return real(p)
+        with mock.patch.object(ops, "_remove_file", rm):
+            j = self.wait(self.q.submit_move([top], "C"))
+        self.assertEqual(j["status"], "partial", j)
+        self.assertIn(ops.R_DEVLOST, j["message"])
+        self.assertFalse(j["results"][0]["ok"])
+        self.assertIn(ops.R_DEVLOST, j["results"][0]["error"])
+        self.assertEqual(j["freed"], {"U": 1000})            # 실제로 지운 것은 1개뿐
+        self.assertEqual(len(os.listdir(os.path.join(gone, "shoot"))), 4)
+        self.assertEqual(len(os.listdir(os.path.join(self.C, "shoot"))), 5)   # 사본은 거두지 않는다
+        self.assertNotIn(("removed", top), self.calls)
+        self.assertFalse(j["undoable"])
 
 
 if __name__ == "__main__":

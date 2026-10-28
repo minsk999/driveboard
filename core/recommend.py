@@ -150,6 +150,25 @@ def _old_folders(idx, cutoff):
     return out
 
 
+def _fits(d, size):
+    """size 를 옮겨 받고도 여유가 BALANCE_FREE_RATIO 이상 남는가(7번 「공간 부족」 과 같은 기준)."""
+    free = int(d.get("free") or 0)
+    total = int(d.get("total") or 0)
+    return free - size >= total * BALANCE_FREE_RATIO and free > size
+
+
+def _roomy_target(pref, drives, src_letter, size):
+    """오래된 폴더를 옮길 곳 — 가장 큰 폴더도 받을 수 있는 곳만. HDD 우선, 없으면 가장 넉넉한 곳, 그것도 없으면 None.
+    (HDD 라는 이유만으로 꽉 찬 드라이브를 권하면 같은 화면의 「공간 부족」 카드와 서로 반대말을 한다.)"""
+    if pref is not None and pref.get("letter") != src_letter and _fits(pref, size):
+        return pref
+    ok = [d for d in drives if d.get("letter") != src_letter and _fits(d, size)]
+    if not ok:
+        return None
+    hdd = [d for d in ok if d.get("kind") == "hdd"]
+    return max(hdd or ok, key=lambda d: int(d.get("free") or 0))
+
+
 def build(indexes, drives_state, settings, dupe_groups, now=None):
     if now is None:
         now = time.time()
@@ -255,6 +274,7 @@ def build(indexes, drives_state, settings, dupe_groups, now=None):
         size0, L0, idx0, d0 = found[0]
         desc = "1년 넘게 수정하지 않은 폴더 %d개예요. 가장 큰 폴더는 %s의 「%s」(%s)예요." % (
             len(found), _where(L0, by_letter.get(L0)), idx0.d_name[d0], fmt_bytes(size0))
+        target = _roomy_target(target, drives, L0, size0)
         if target is not None:
             desc += " 여유가 많은 드라이브로 옮겨 보세요 — %s %s 남음." % (
                 _dname(target), fmt_bytes(target.get("free")))

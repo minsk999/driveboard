@@ -1,5 +1,6 @@
 /* DriveBoard — 트리맵 (캔버스, 의존성 0).
- * window.Treemap.create(containerEl, {load, colorOf, formatSize, onOpenItem, onContext, onPath})
+ * window.Treemap.create(containerEl, {load, colorOf, catName, formatSize, onOpenItem, onContext, onPath})
+ *   catName(catId) -> 툴팁 구성 줄에 붙일 카테고리 이름(없으면 색 점만)
  *   -> {open(dirId), up(), resize(), destroy(), setHighlight(catIdOrNull)}
  * node = GET /api/tree 의 node (SPEC §7): {id,name,path,size,cat,cat_bytes,kind,other?,children}, 깊이 2.
  * 안전: 'loose'(작은 파일 묶음, id·path 가 부모 폴더와 같다)·'other'·화면 묶음은 열기/우클릭 콜백을 절대 부르지 않는다.
@@ -59,7 +60,7 @@
     '.tm-tip .tq{color:rgba(255,255,255,.5);font-size:11px;margin-left:auto;white-space:nowrap}',
     '.tm-tip .tb{display:flex;gap:1px;height:5px;margin-top:8px;border-radius:3px;overflow:hidden;background:rgba(255,255,255,.06)}',
     '.tm-tip .tb i{display:block;height:100%;min-width:1px}',
-    '.tm-tip .td{display:flex;gap:10px;margin-top:6px;color:rgba(255,255,255,.62);font-size:11px}',
+    '.tm-tip .td{display:flex;flex-wrap:wrap;gap:3px 10px;margin-top:6px;color:rgba(255,255,255,.62);font-size:11px}',
     '.tm-tip .td span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}',
     '.tm-tip .td b,.tm-tip .tm b{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}',
     '.tm-tip .tm{display:flex;align-items:center;gap:6px;margin-top:7px;color:rgba(255,255,255,.55);font-size:11px}',
@@ -332,6 +333,9 @@
     }
     function callColor(i) {
       try { return opts.colorOf ? String(opts.colorOf(i)) : ''; } catch (e) { return ''; }
+    }
+    function callName(i) {
+      try { return opts.catName ? String(opts.catName(i) || '') : ''; } catch (e) { return ''; }
     }
     function readTheme() {
       var cs = win.getComputedStyle(root);
@@ -1024,7 +1028,10 @@
           var sp = doc.createElement('span'), dot = doc.createElement('b');
           dot.style.background = S.catCss[order[i]];
           sp.appendChild(dot);
-          sp.appendChild(doc.createTextNode(p >= 99.5 ? '100%' : p < 1 ? '1% 미만' : Math.round(p) + '%'));
+          // 다른 카테고리가 조금이라도 있으면 맨 위가 100% 로 반올림되지 않게(「100% · 1% 미만」 은 합이 넘쳐 보인다)
+          var pt = p >= 99.5 ? (order.length > 1 ? '99%' : '100%') : p < 1 ? '1% 미만' : Math.round(p) + '%';
+          var cn = callName(order[i]);
+          sp.appendChild(doc.createTextNode(cn ? cn + ' ' + pt : pt));
           T.d.appendChild(sp);
         }
       }

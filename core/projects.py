@@ -29,16 +29,79 @@ _TOOL_DIR = re.compile(r"(?i)^(?:aepx?|ae|after[ _]?effects?|pr|premiere(?:[ _]?
                        r"edit(?:ing)?|편집|작업[ _]?파일|src|sources?|소스|원본)$")
 
 
-def _aep_below(kids, aep, names):
+_TOKENS = re.compile(r"[_\s]+")
+
+
+def _rest_tokens(name):
+    """날짜 뒤 나머지의 낱말 수 — 「2025-11_한빛은행_런칭」 은 2, 「2026-12 정리」 는 1, 「2026-08」 은 0."""
+    _ymd, rest = brc.split_date(name)
+    return len([t for t in _TOKENS.split(rest or "") if t])
+
+
+def _day_dated(name):
+    ymd = brc.parse_date(name)
+    return ymd is not None and ymd[2] is not None
+
+
+def _aep_hit(g, ch, aep, names):
+    """g 가 aep 를 직속으로, 또는 도구 폴더 한 겹 아래(b/AE/y.aep · AE/v1/x.aep)에 갖고 있는가."""
+    if g in aep:
+        return True
+    gt = bool(_TOOL_DIR.match(names[g]))
+    for t in ch[g] or ():
+        if t in aep and (gt or _TOOL_DIR.match(names[t])):
+            return True
+    return False
+
+
+def _aep_below(kids, aep, names, ch=None):
     """규칙 3 의 「한 단계 아래 aep」. ★모음 폴더(D:\\Projects 처럼 프로젝트 폴더를 모아 둔 곳)는 아니다:
-    aep 가 있는 자식이 날짜 이름(그 자체로 프로젝트)이거나, 도구 폴더가 아닌 자식 둘 이상에 흩어져 있으면
-    부모를 프로젝트로 삼지 않고 안으로 내려간다 — 그러지 않으면 모음 폴더 하나가 프로젝트 전부를 삼킨다."""
-    hits = [g for g in kids or () if g in aep]
-    if not hits:
+    aep 가 있는 자식이 날짜 이름(그 자체로 프로젝트)이거나, 도구 폴더가 아닌 자식 둘 이상에 흩어져 있거나,
+    aep 가 도구 폴더가 아닌 이름 붙은 자식에 있고 일까지 있는 날짜 이름의 형제(260803_… 프로젝트)가 있으면
+    부모를 프로젝트로 삼지 않고 안으로 내려간다 — 그러지 않으면 모음 폴더 하나가 프로젝트 전부를 삼킨다.
+    (aep 가 AE 같은 도구 폴더에 있으면 날짜 형제는 그 프로젝트의 수정본 폴더로 본다.)
+    자식의 aep 는 도구 폴더 한 겹까지 본다(b/AE/y.aep 의 b 도 aep 가 있는 자식이다)."""
+    kids = kids or ()
+    if ch is None:
+        claim = [g for g in kids if g in aep]
+        hits = claim
+    else:
+        # 부모가 가질 수 있는 aep: 자식에 직속, 또는 도구 폴더 사슬(AE/v1/x.aep)
+        claim = [g for g in kids
+                 if g in aep or (_TOOL_DIR.match(names[g]) and any(t in aep for t in ch[g] or ()))]
+        # 모음 폴더 판정에는 이름 붙은 자식의 도구 폴더 속 aep(b/AE/y.aep)도 센다
+        hits = [g for g in kids if g in claim or _aep_hit(g, ch, aep, names)]
+    if not claim:
         return False
     if any(brc.parse_date(names[g]) is not None for g in hits):
         return False
-    return sum(1 for g in hits if not _TOOL_DIR.match(names[g])) < 2
+    named = [g for g in hits if not _TOOL_DIR.match(names[g])]
+    if len(named) >= 2:
+        return False
+    if any(not _TOOL_DIR.match(names[g]) for g in claim) and \
+            any(_day_dated(names[g]) for g in kids if g not in hits):
+        return False
+    return True
+
+
+def _date_container(c, ch, names, aep, alive):
+    """날짜로 시작하지만 프로젝트가 아니라 날짜별 「모음 폴더」인가(2026-08 · 2026_09 · 2026-12 정리).
+
+    월 날짜(일 없음)만 있는 이름(2026-08)은 안에 일까지 있는 날짜 이름 폴더가 있거나 aep 를 직속으로 갖지 않으면
+    모음 폴더다. 월 날짜 + 낱말 하나(2026-12 정리 · 2025-11_한빛은행)는 안에 「날짜_광고주_캠페인…」 처럼 이름이
+    붙은 날짜 폴더(낱말 둘 이상)가 있을 때만 모음 폴더다 — 「251105_수정본」 같은 수정본 폴더는 그 프로젝트의 일부다.
+    「2025-11_한빛은행_런칭」 처럼 낱말 둘 이상이 붙은 월 폴더는 그대로 프로젝트다.
+    """
+    ymd = brc.parse_date(names[c])
+    if ymd is None or ymd[2] is not None:
+        return False
+    n = _rest_tokens(names[c])
+    if n >= 2:
+        return False
+    for g in ch[c] or ():
+        if alive[g] and _day_dated(names[g]) and (n == 0 or _rest_tokens(names[g]) >= 2):
+            return True
+    return n == 0 and c not in aep
 
 
 def _dids_of(idx, paths):
@@ -188,6 +251,7 @@ def detect_projects(idx, settings=None, classifier=None):
     ch = idx.d_children
     names = idx.d_name
     size = idx.d_size
+    alive = idx.d_alive
     dir_ctx = cls.dir_ctx
     needs_paths = getattr(cls, "needs_paths", True)
     out = []
@@ -211,9 +275,14 @@ def detect_projects(idx, settings=None, classifier=None):
                 continue
             is_proj = False
             if c not in excluded and c not in roots:
-                if in_root or brc.parse_date(nm) is not None or c in aep:
+                if in_root:
                     is_proj = True
-                elif aep and _aep_below(ch[c], aep, names):
+                elif brc.parse_date(nm) is not None:
+                    is_proj = not _date_container(c, ch, names, aep, alive)
+                elif c in aep:
+                    is_proj = True
+                elif aep and not _TOOL_DIR.match(nm) and _aep_below(ch[c], aep, names, ch):
+                    # 도구 폴더(AE·Projects …) 자체는 「한 단계 아래 aep」 로 프로젝트가 되지 않는다 — 그 부모의 것이다
                     is_proj = True
             if is_proj:
                 out.append(_record(idx, c, letter, parser, aliases, workers))

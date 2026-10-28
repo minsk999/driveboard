@@ -419,7 +419,11 @@ class BLead(unittest.TestCase):
         self.assertEqual(j["status"], "done", j)
         ndst = E.p("N-0d2634", "_시험", "복사폴더")
         self.assertTrue(os.path.isdir(ndst))
-        u = E.wait_job(E.post("/api/ops/undo", {"job_id": j["id"]})[1]["job_id"])
+        s, d = E.post("/api/ops/undo", {"job_id": j["id"]})          # 영구 삭제가 되는 되돌리기는 확인부터
+        self.assertEqual((s, d["error"], d.get("permanent")), (400, "need_confirm", True), d)
+        self.assertTrue(os.path.isdir(ndst))
+        self.assertTrue(next(x for x in E.get("/api/jobs")[1]["jobs"] if x["id"] == j["id"])["undoable"])
+        u = E.wait_job(E.post("/api/ops/undo", {"job_id": j["id"], "confirm": True})[1]["job_id"])
         self.assertEqual(u["status"], "done", u)
         self.assertTrue(u.get("permanent"))
         self.assertFalse(os.path.exists(ndst))

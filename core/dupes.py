@@ -54,7 +54,8 @@ def find_dupes(indexes, min_bytes=50 << 20):
             for letter, i in members:
                 idx = indexes[letter]
                 p = path_of_file(idx, i)
-                k = (letter, os.path.normcase(os.path.normpath(p)))
+                # 경로만으로 가린다 — 같은 공유가 두 이름(Z: 와 등록한 NAS)으로 보이면 같은 파일이 두 번 나온다
+                k = os.path.normcase(os.path.normpath(p))
                 if k in seen:
                     continue
                 seen.add(k)
@@ -80,8 +81,14 @@ def quick_hash(path):
 
     Files of 3MB or less are hashed whole. Raises OSError when unreadable.
     """
+    return quick_hash_stat(path)[0]
+
+
+def quick_hash_stat(path):
+    """(quick_hash, size, mtime) — 해시를 읽은 그 파일의 크기·수정 시각(지문용)."""
     with open(_scan_path(path), "rb") as f:
-        size = os.fstat(f.fileno()).st_size
+        st = os.fstat(f.fileno())
+        size = st.st_size
         h = hashlib.blake2b(digest_size=20)
         h.update(size.to_bytes(8, "little"))
         if size <= 3 * QUICK_CHUNK:
@@ -94,7 +101,7 @@ def quick_hash(path):
             for off in (0, size // 2 - QUICK_CHUNK // 2, size - QUICK_CHUNK):
                 f.seek(off)
                 h.update(f.read(QUICK_CHUNK))
-    return "%d-%s" % (size, h.hexdigest())
+    return "%d-%s" % (size, h.hexdigest()), size, st.st_mtime
 
 
 def verify_group(group, cancel=None):
@@ -103,7 +110,7 @@ def verify_group(group, cancel=None):
     True  = every item has the same quick hash (and at least two were read)
     False = at least two readable items differ
     None  = fewer than two items could be read (or canceled)
-    Item dicts get 'hash' (or 'error').
+    Item dicts get 'hash' (or 'error') and 'disk_size'/'disk_mtime' (what was read — see fingerprint()).
     """
     hashes = []
     for it in group["items"]:
@@ -111,12 +118,15 @@ def verify_group(group, cancel=None):
             group["verified"] = None
             return None
         try:
-            hv = quick_hash(it["path"])
+            hv, sz, mt = quick_hash_stat(it["path"])
             it["hash"] = hv
+            it["disk_size"] = sz
+            it["disk_mtime"] = mt
             it.pop("error", None)
             hashes.append(hv)
         except OSError as e:
             it["hash"] = None
+            it["disk_size"] = it["disk_mtime"] = None
             it["error"] = str(e)
     if len(hashes) < 2:
         res = None
@@ -126,3 +136,39 @@ def verify_group(group, cancel=None):
             res = None      # the readable ones match but some could not be read
     group["verified"] = res
     return res
+
+
+# ── 확인 결과의 지문 ──
+# 묶음 id 는 「크기:이름」뿐이라 같은 이름·크기로 다시 내보낸 파일, 새로 들어온 같은 이름의 파일도 같은 id 다.
+# 그래서 확인 결과는 「그때 읽은 파일들」의 (경로, 크기, 수정 시각) 과 함께 두고, 지금 인덱스의 묶음이
+# 그 지문과 그대로 맞을 때만 다시 보여 준다. 하나라도 다르면 미확인(None)이다.
+_MTIME_TOL = 1e-3
+
+
+def _pkey(p):
+    return os.path.normcase(os.path.normpath(p))
+
+
+def fingerprint(group):
+    """verify_group 을 마친 묶음 → {경로 키: (크기, 수정 시각)} — 디스크에서 읽은 값(인덱스 값이 아니다)."""
+    return {_pkey(it["path"]): (it.get("disk_size"), it.get("disk_mtime")) for it in group["items"]}
+
+
+def fingerprint_matches(fp, group):
+    """지금(인덱스) 묶음의 구성원·크기·수정 시각이 지문과 모두 같은가."""
+    if not isinstance(fp, dict) or len(fp) != len(group["items"]):
+        return False
+    size = group["size"]
+    for it in group["items"]:
+        v = fp.get(_pkey(it["path"]))
+        if v is None:
+            return False
+        sz, mt = v
+        if sz is None or mt is None or sz != size:
+            return False
+        try:
+            if abs(float(it["mtime"]) - float(mt)) > _MTIME_TOL:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True

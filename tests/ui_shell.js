@@ -349,7 +349,7 @@ function stopServer(s) {
       await page.keyboard.press('Escape');
       await page.waitForTimeout(200);
       await page.keyboard.press('Escape');
-      await page.waitForSelector('#tray:not(.show)', { timeout: 5000 });
+      await page.waitForSelector('#tray:not(.show)', { state: 'attached', timeout: 5000 });   // 숨은 트레이는 visibility:hidden
       await page.waitForTimeout(200);
       assert(await page.locator('.proj-host .sel').count() === 0, 'Esc 로 해제하면 프로젝트 카드 선택도 풀린다');
       log('projects selection ↔ tray ok');

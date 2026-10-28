@@ -679,12 +679,16 @@ def _fake_list_drives(network_locations=None):
             out.append(_fake_entry(key, droot, m))
         return out
     by_unc = {m["unc"].lower(): (key, droot, m) for key, droot, m in nets if m["unc"]}
+    mapped = {d["unc"].lower(): d["letter"] for d in out if d.get("unc")}     # _win_list_drives 와 같은 규칙
     for key, u, label in _loc_entries(network_locations):
         hit = by_unc.get(u.lower())
         if hit is None:
-            out.append(_offline_location(key, u, label))
+            e = _offline_location(key, u, label)
         else:
-            out.append(_fake_entry(key, hit[1], hit[2], label=label))
+            e = _fake_entry(key, hit[1], hit[2], label=label)
+        if u.lower() in mapped:
+            e["same_as"] = mapped[u.lower()]    # 같은 공유가 문자로도 매핑돼 있다(합계에서 두 번 세지 말 것)
+        out.append(e)
     return out
 
 
@@ -987,12 +991,17 @@ def _win_has_bin_dir(root):
 
 
 def _win_local_has_bin(dtype, fs, root):
-    """고정(내장·외장) NTFS/ReFS = 있음. 그 밖(FAT·exFAT·이동식)은 $RECYCLE.BIN 폴더가 이미 있을 때만. 모르면 없음."""
-    if dtype == DRIVE_FIXED and (fs or "").upper() in ("NTFS", "REFS"):
+    """고정(내장·외장) NTFS/ReFS = 있음. 고정 FAT·exFAT 는 $RECYCLE.BIN 폴더가 이미 있을 때만. 모르면 없음.
+
+    이동식(DRIVE_REMOVABLE — SD 카드·USB 메모리)은 폴더가 있어도 **없음**이다. 셸은 드라이브 종류로
+    휴지통 대상을 정하고(고정 드라이브만) 이동식 매체의 $RECYCLE.BIN 은 보지 않는다 — 다른 리더에서
+    고정 디스크로 잡혔을 때 생긴 폴더가 남아 있어도 FOF_ALLOWUNDO 는 그 매체에서 영구 삭제가 된다.
+    """
+    if dtype != DRIVE_FIXED:
+        return False
+    if (fs or "").upper() in ("NTFS", "REFS"):
         return True
-    if dtype in (DRIVE_FIXED, DRIVE_REMOVABLE):
-        return _win_has_bin_dir(root)
-    return False
+    return _win_has_bin_dir(root)
 
 
 def _win_net_probe(root):

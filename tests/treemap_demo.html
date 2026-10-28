@@ -294,6 +294,7 @@
   var tm = Treemap.create(document.getElementById('stage'), {
     load: load,
     colorOf: function (i) { return 'var(--c' + i + ')'; },
+    catName: function (i) { return (CATS[i] || CATS[CATS.length - 1])[1]; },
     formatSize: formatSize,
     onOpenItem: function (it) { status('열기: ' + it.name); window.demo.events.push(['open', it.name]); },
     onContext: function (it, x, y) { status('메뉴: ' + it.name + ' @' + x + ',' + y); window.demo.events.push(['ctx', it.name, x, y]); },

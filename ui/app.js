@@ -241,10 +241,12 @@ const DEFAULT_CATS = [
 ].map(([key, name], id) => ({ id, key, name, deletable: id !== 9, desc: '' }));
 const catOf = i => S.cats[i] || DEFAULT_CATS[i] || DEFAULT_CATS[10];
 const catName = i => (i == null ? '기타' : catOf(i).name);
-const SEGK = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 'c9', 'c10', 'bin', 'un'];
+/* un = 스캔한 드라이브에서 확인하지 못한 공간(시스템·권한 없음 등) · ns = 아직 스캔하지 않은 드라이브의 사용 공간 */
+const SEGK = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 'c9', 'c10', 'bin', 'un', 'ns'];
 function segName(k) {
   if (k === 'bin') return (S.virt.bin && S.virt.bin.name) || '휴지통';
   if (k === 'un') return (S.virt.unscanned && S.virt.unscanned.name) || '시스템·확인 불가';
+  if (k === 'ns') return '아직 스캔 안 함';
   if (k === 'free') return '남은 공간';
   if (k === 'in') return '옮겨 올 항목';
   return catName(Number(k.slice(1)));
@@ -351,6 +353,19 @@ const Tip = {
     document.addEventListener('pointerdown', () => this.hide(), true);
     window.addEventListener('blur', () => this.hide());
     document.addEventListener('scroll', () => this.hide(), true);
+    // 떠 있는 툴팁의 대상이 data-tip 을 바꾸면(스캔 버튼이 「취소」↔「모두 스캔」으로 바뀌는 등) 그 자리에서 새 문구로 바꾼다.
+    // 포인터가 같은 요소 안에 머무르면 pointerover 가 다시 오지 않아 옛 문구가 남는다.
+    if (window.MutationObserver) {
+      new MutationObserver(ms => { if (this.cur && ms.some(m => m.target === this.cur)) this.refresh(); })
+        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-tip'], subtree: true });
+    }
+  },
+  refresh() {
+    const t = this.cur;
+    if (!t || this.rich || !this.el.classList.contains('show')) return;   // 아직 안 떴으면 show() 가 그때의 문구를 읽는다
+    const txt = t.isConnected ? t.getAttribute('data-tip') : '';
+    if (!txt) { this.hide(); return; }
+    if (this.el.textContent !== txt) this.show(t);
   },
   show(t) {
     if (!t.isConnected || document.body.classList.contains('dragging')) return;
@@ -422,8 +437,8 @@ function attachScrollbar(sc, host) {
     th.style.height = tH + 'px';
     th.style.transform = `translateY(${y}px)`;
   };
-  const flash = () => { upd(); sb.classList.add('on'); clearTimeout(hideT); hideT = setTimeout(() => { if (!drag && !sb.classList.contains('hover')) sb.classList.remove('on'); }, 900); };
-  sc.addEventListener('scroll', flash, { passive: true });
+  const flash = (ms = 900) => { upd(); sb.classList.add('on'); clearTimeout(hideT); hideT = setTimeout(() => { if (!drag && !sb.classList.contains('hover')) sb.classList.remove('on'); }, ms); };
+  sc.addEventListener('scroll', () => flash(), { passive: true });
   host.addEventListener('pointermove', e => {
     if (sb.style.display === 'none') return;
     const r = sb.getBoundingClientRect();
@@ -461,7 +476,7 @@ function attachScrollbar(sc, host) {
     mo.observe(sc, { childList: true });
   }
   upd();
-  return { update: upd, destroy() { if (ro) ro.disconnect(); if (mo) mo.disconnect(); sb.remove(); sc._sb = null; } };
+  return { update: upd, flash: ms => { if (sc.scrollHeight > sc.clientHeight + 1) flash(ms); }, destroy() { if (ro) ro.disconnect(); if (mo) mo.disconnect(); sb.remove(); sc._sb = null; } };
 }
 
 /* ═════════════════════════════════════════════ 누적 막대 */
@@ -530,7 +545,7 @@ class Bar {
       let b;
       if (k === 'free') { b = t - sum(this.keys.map(x => this.vals[x] || 0)); } else b = this.vals[k] || 0;
       const r = this.el.getBoundingClientRect();
-      const sw = k === 'free' ? 'var(--track-hi)' : k === 'un' ? 'var(--hatch)' : k === 'in' ? 'var(--lime)' : k === 'bin' ? 'var(--cbin)' : `var(--${k})`;
+      const sw = k === 'free' ? 'var(--track-hi)' : k === 'un' ? 'var(--hatch)' : k === 'ns' ? 'var(--hatch-ns)' : k === 'in' ? 'var(--lime)' : k === 'bin' ? 'var(--cbin)' : `var(--${k})`;
       Tip.showHTML(`<div class="tt"><i style="background:${sw}"></i>${esc(segName(k))}</div><div class="ts"><b>${fmtBytes(b)}</b> · 전체의 ${fmtPct(b, t)}</div>`, e.clientX, r.top, r.bottom);
       HL.set(k === 'in' ? null : k);
     });
@@ -548,6 +563,9 @@ function driveVals(d) {
   v.bin = d.bin_bytes || 0;
   if (live) v.un = Math.max(0, (d.used || 0) - (sc.bytes || 0) - v.bin);
   else v.un = d.unscanned_bytes != null ? d.unscanned_bytes : Math.max(0, (d.used || 0) - (d.scanned_bytes || 0) - v.bin);
+  // 스캔한 적 없는 드라이브의 나머지는 「확인하지 못한」 공간이 아니라 「아직 안 본」 공간이다(시스템 파일로 읽히면 안 된다).
+  // 스캔 중인 드라이브는 진행에 따라 줄어드는 「확인 불가」로 둔다.
+  if (!d.scanned && !live) { v.ns = v.un; v.un = 0; }
   return v;
 }
 function addVals(a, b) { const o = Object.assign({}, a); for (const k in b) o[k] = (o[k] || 0) + (b[k] || 0); return o; }
@@ -572,8 +590,10 @@ class Legend {
     for (const k of [...SEGK, 'free']) {
       const nm = h('span', { text: segName(k) });
       const v = h('b', { class: 'num', text: '' });
-      const c = h(k === 'free' || k === 'un' ? 'span' : 'button', { class: 'lg' + (k === 'free' || k === 'un' ? ' static' : ''), 'data-c': k, type: 'button' }, h('i'), nm, v);
-      if (k === 'un') c.setAttribute('data-tip', '사용 중이지만 스캔으로 확인하지 못한 공간이에요.\n시스템 파일·권한이 없는 폴더·볼륨 섀도 복사본 등이에요.');
+      const st = k === 'free' || k === 'un' || k === 'ns';
+      const c = h(st ? 'span' : 'button', { class: 'lg' + (st ? ' static' : ''), 'data-c': k, type: 'button' }, h('i'), nm, v);
+      if (k === 'un') c.setAttribute('data-tip', '스캔한 드라이브에서 사용 중이지만 확인하지 못한 공간이에요.\n시스템 파일·권한이 없는 폴더·볼륨 섀도 복사본 등이에요.');
+      if (k === 'ns') c.setAttribute('data-tip', '아직 스캔하지 않은 드라이브가 쓰는 공간이에요.\n스캔하면 무엇이 차지하는지 보여 드려요.');
       c.addEventListener('pointerenter', () => HL.set(k === 'free' ? 'free' : k));
       c.addEventListener('pointerleave', () => HL.set(null));
       if (c.tagName === 'BUTTON') c.addEventListener('click', () => this.onPick && this.onPick(k));
@@ -915,6 +935,8 @@ const Tray = {
   el: null, bar: null, shown: false,
   init() {
     this.el = $('#tray');
+    this.el.inert = true;
+    this.el.setAttribute('aria-hidden', 'true');
     $('#trCk').innerHTML = ic('check');
     this.bar = new Bar('b-sm', { reveal: false });
     $('#trComp').append(this.bar.el);
@@ -942,6 +964,9 @@ const Tray = {
     if (show !== this.shown) {
       this.shown = show;
       this.el.classList.toggle('show', show);
+      // 숨은 트레이의 버튼이 Tab 순서에 남지 않게(보이지 않는 포커스 4칸)
+      this.el.inert = !show;
+      if (show) this.el.removeAttribute('aria-hidden'); else this.el.setAttribute('aria-hidden', 'true');
       document.body.classList.toggle('tray-on', show);
       if (!show) { const t = Pop.top(); if (t && t.o.cls && t.o.cls.includes('mvpop')) Pop.closeAll(); }
     }
@@ -1036,9 +1061,36 @@ const MovePop = {
     const fade = () => lw.classList.toggle('fade', list.scrollHeight > list.clientHeight + 2 && list.scrollTop + list.clientHeight < list.scrollHeight - 6);
     list.addEventListener('scroll', fade, { passive: true });
     this.fade = fade;
-    requestAnimationFrame(fade);
+    requestAnimationFrame(() => { this.fit(); if (this.sb) this.sb.flash(1400); });   // 넘치면 처음부터 스크롤 막대를 잠깐 보여 준다
   },
-  refresh(items) { if (!this.p || this.p.closed) return; this.items = items; this.build(this.list, items); Pop.place(this.p); if (this.fade) this.fade(); },
+  refresh(items) { if (!this.p || this.p.closed) return; this.items = items; this.build(this.list, items); this.fit(); },
+  /* 목록이 잘리는 자리가 묶음 제목(「외장·USB」) 바로 아래면 그 묶음이 비어 보인다 → 제목 위에서 자른다 */
+  fit() {
+    const list = this.list;
+    if (!list || !this.p || this.p.closed) return;
+    if (list.scrollTop === 0) {
+      list.style.maxHeight = '';
+      if (list.scrollHeight > list.clientHeight + 2) {
+        const lr = list.getBoundingClientRect();
+        for (const gh of list.querySelectorAll('.mv-grp')) {
+          const r = gh.getBoundingClientRect();
+          if (r.top >= lr.bottom) break;
+          const nx = gh.nextElementSibling;
+          const nr = nx ? nx.getBoundingClientRect() : r;
+          if (nr.top + Math.min(nr.height, 36) > lr.bottom) {   // 제목은 보이는데 첫 줄이 거의 안 보인다
+            list.style.maxHeight = Math.max(120, Math.floor(r.top - lr.top)) + 'px';
+            break;
+          }
+        }
+      }
+    }
+    Pop.place(this.p);
+    if (this.fade) this.fade();
+  },
+  fitSoon() {
+    if (this._fitR) return;
+    this._fitR = requestAnimationFrame(() => { this._fitR = 0; this.fit(); });
+  },
   buildFoot() {
     const foot = this.foot;
     foot.textContent = '';
@@ -1108,6 +1160,7 @@ const MovePop = {
         bar.el.classList.add('loading');
         POST('/api/ops/preview_move', { paths, target: d.letter, mode }).then(pv => {
           if (g !== this.gen) return;
+          this.fitSoon();   // 안내 줄이 생기면 줄 높이가 바뀐다
           bar.el.classList.remove('loading');
           bar.set(Object.assign({}, vals, { in: pv.bytes }), d.total);
           after.innerHTML = `${M.after} <b>${fmtBytes(Math.max(0, pv.target_free_after))}</b> 남음`;
@@ -1132,6 +1185,7 @@ const MovePop = {
           row.onclick = () => { const its = this.items; Pop.closeAll(); confirmMove(its, d.letter, { mode, pv, from: this.anchor }); };
         }).catch(e => {
           if (g !== this.gen) return;
+          this.fitSoon();
           bar.el.classList.remove('loading');
           row.classList.add('off');
           why.textContent = e.message;
@@ -1161,6 +1215,44 @@ function skelBody() {
 }
 const titleFor = (items, verb) => items.length === 1 ? `이 항목을 ${verb}` : `${fmtNum(items.length)}개 항목을 ${verb}`;
 const nameOf = p => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+/* 시트 부제: 앞의 두 이름. 이름이 같으면(중복 파일) 장치 꼬리표 → 그래도 같으면 상위 폴더까지 붙여 구분한다 */
+function subFor(items) {
+  if (items.length === 1) return items[0].name;
+  const lead = items.slice(0, 2);
+  const same = a => a[0].toLowerCase() === a[1].toLowerCase();
+  let names = lead.map(i => i.name);
+  if (same(names)) {
+    const tagOf = i => { const d = driveOf(i.drive) || drivePath(i.path); return dtag(d) || dlabel(d) || ''; };
+    names = lead.map(i => `${tagOf(i)} ${i.name}`.trim());
+    if (same(names)) {
+      names = lead.map(i => {
+        const s = String(i.path || '').replace(/[\\/]+$/, '');
+        const sep = s.includes('\\') ? '\\' : '/';
+        const parts = s.split(/[\\/]/);
+        return `${tagOf(i)} …${sep}${parts.slice(-2).join(sep)}`.trim();
+      });
+    }
+  }
+  return `${names.join(', ')}${items.length > 2 ? ` 외 ${fmtNum(items.length - 2)}개` : ''}`;
+}
+/* 중복 파일 묶음 중 남은 사본을 전부 지우게 되는 묶음(남길 사본이 없다) */
+function wipedDupeGroups(items) {
+  const keys = new Set(items.map(i => i.key));
+  const seen = new Set(), out = [];
+  for (const it of items) {
+    const g = it && it._dg;
+    if (!g || seen.has(g)) continue;
+    seen.add(g);
+    const left = [...g.keys].filter(k => { const r = REG.byKey.get(k); return !(r && r.it && r.it._pending); });
+    if (left.length && left.every(k => keys.has(k))) out.push(g);
+  }
+  return out;
+}
+function wipedNote(wiped) {
+  return note('danger', 'warn',
+    h('b', { text: wiped.length === 1 ? `「${wiped[0].name}」의 사본을 모두 골랐어요. ` : `모든 사본을 지우는 묶음이 ${fmtNum(wiped.length)}개 있어요. ` }),
+    '남길 사본이 없어요. 하나는 남기려면 그 사본의 선택을 해제하세요.');
+}
 /* 경로 줄이기 — 드라이브/루트는 남기고 가운데 폴더를 「…」로, 끝 폴더들은 남긴다.
    Windows(C:\), UNC(\\서버\공유\), POSIX(가짜 드라이브 루트) 모두 같은 규칙. */
 function splitPath(p) {
@@ -1235,16 +1327,17 @@ async function confirmRecycle(items, o = {}) {
     items = items.filter(i => !skipped.includes(i));
   }
   const paths = items.map(i => i.path);
+  const wiped = wipedDupeGroups(items);
   const go = h('button', { class: 'btn danger', type: 'button', html: ic('trash') + '<span>휴지통으로 보내기</span>', disabled: true });
   const cancel = h('button', { class: 'btn ghost', type: 'button', text: '취소' });
   const sh = Sheet.open({
     icon: tile('bin', 'trash', 't-lg'),
     title: titleFor(items, '휴지통으로 보낼까요?'),
-    sub: items.length === 1 ? items[0].name : `${items.slice(0, 2).map(i => i.name).join(', ')}${items.length > 2 ? ` 외 ${items.length - 2}개` : ''}`,
+    sub: subFor(items),
     body: skelBody(),
   });
   sh.primary = go;
-  sh.setFoot([h('span', { class: 'hint', text: 'Enter 로 실행 · Esc 로 닫기' }), h('span', { class: 'sp' }), cancel, go]);
+  sh.setFoot([h('span', { class: 'hint', text: wiped.length ? '확인을 체크해야 보낼 수 있어요 · Esc 로 닫기' : 'Enter 로 실행 · Esc 로 닫기' }), h('span', { class: 'sp' }), cancel, go]);
   cancel.addEventListener('click', () => sh.close());
   let ins;
   try { ins = await POST('/api/inspect', { paths }); } catch (e) { if (!sh.closed) { sh.body.textContent = ''; sh.body.append(note('danger', 'warn', e.message)); } return; }
@@ -1254,6 +1347,9 @@ async function confirmRecycle(items, o = {}) {
   const missing = ins.items.filter(x => x.exists === false);
   const blocked = ins.items.filter(x => x.protected);
   body.append(h('div', { class: 'stats3' }, stat('크기', fmtBytes(ins.total)), stat('파일', fmtNum(ins.total_files) + '개'), stat('항목', fmtNum(exist.length) + '개')));
+  // 중복 파일: 한 묶음의 사본을 전부 고르면 남는 사본이 없다 — 경고하고 따로 확인받는다(Enter 한 번으로 못 지나가게)
+  let wipeOk = !wiped.length;
+  if (wiped.length) body.append(wipedNote(wiped));
   body.append(compBlock(ins.cat_bytes, ins.total));
   // 폴더 안의 다른 카테고리도 함께 지워진다는 안내
   const lvc = S.screen && S.screen.lv ? S.screen.lv.o.cat : S.route.cat;
@@ -1277,10 +1373,12 @@ async function confirmRecycle(items, o = {}) {
   }
   if (missing.length) body.append(note('', 'info', `${fmtNum(missing.length)}개는 이미 없어서 건너뛰어요.`));
   if (blocked.length) body.append(blockedNote(blocked.map(b => ({ path: b.path, reason: b.protected_reason }))));
+  const sync = () => { go.disabled = !!blocked.length || !exist.length || !wipeOk; };
+  if (wiped.length) body.append(checkRow('남길 사본 없이 모든 사본을 휴지통으로 보낸다는 것을 확인했어요', v => { wipeOk = v; sync(); }));
   sh.body.textContent = '';
   sh.body.append(body);
-  go.disabled = !!blocked.length || !exist.length;
-  if (!go.disabled) go.focus({ preventScroll: true });
+  sync();
+  if (!go.disabled && !wiped.length) go.focus({ preventScroll: true });
   go.addEventListener('click', async () => {
     if (go.disabled) return;
     go.disabled = true; sh.busy = true;
@@ -1297,13 +1395,29 @@ async function confirmRecycle(items, o = {}) {
       if (o.onDone) o.onDone();
     } catch (e) {
       sh.busy = false;
-      go.disabled = false;
+      sync();
       go.innerHTML = ic('trash') + '<span>휴지통으로 보내기</span>';
       sh.shake();
       if (e.code === 'no_bin') { sh.close(); confirmDelete(items, o); return; }
       sh.body.append(e.code === 'protected' ? blockedNote(e.data.blocked || []) : note('danger', 'warn', e.message));
     }
   });
+}
+
+/* 영구 삭제 직전 서버가 「확인창보다 늘었다」(409 changed) 고 거절했을 때 — 무엇이 늘었는지와 다시 스캔 */
+function grownNote(data, sh) {
+  const g = (data && data.grown) || [];
+  const lines = g.slice(0, 3).map(x => `${nameOf(x.path)}: ${fmtBytes(x.confirmed_bytes)} → ${fmtBytes(x.bytes)} · 파일 ${fmtNum(x.confirmed_files)} → ${fmtNum(x.files)}개`);
+  const letters = [...new Set(g.map(x => letterOfPath(x.path)).filter(Boolean))];
+  const kids = [h('b', { text: '확인창을 띄운 뒤 내용이 늘어서 지우지 않았어요. ' }),
+    '보여 드린 것보다 더 지우지 않도록 멈췄어요. 다시 스캔한 뒤 확인해 주세요.',
+    ...lines.map(t => h('div', { class: 'num', style: { marginTop: '3px' }, text: t })),
+    g.length > 3 ? h('div', { style: { marginTop: '3px' }, text: `외 ${fmtNum(g.length - 3)}개` }) : null];
+  if (letters.length) {
+    kids.push(h('div', { style: { marginTop: '8px' } }, h('button', { class: 'btn sm', type: 'button', html: ic('scan') + '<span>다시 스캔</span>',
+      onclick: () => { if (sh) sh.close(); startScan(letters); } })));
+  }
+  return note('danger', 'warn', ...kids.filter(Boolean));
 }
 
 /* 영구 삭제 — 휴지통이 없는 위치(NAS·USB 메모리)용. 체크박스 확인 1회(SPEC-2 A.1) */
@@ -1323,7 +1437,7 @@ async function confirmDelete(items, o = {}) {
   const sh = Sheet.open({
     icon: h('span', { class: 'tile t-lg danger-tile', html: ic('trash') }),
     title: titleFor(items, '영구 삭제할까요?'),
-    sub: items.length === 1 ? items[0].name : `${items.slice(0, 2).map(i => i.name).join(', ')}${items.length > 2 ? ` 외 ${items.length - 2}개` : ''}`,
+    sub: subFor(items),
     body: skelBody(), cls: 'danger',
   });
   sh.primary = go;
@@ -1342,9 +1456,14 @@ async function confirmDelete(items, o = {}) {
   body.append(note('danger', 'warn', h('b', { text: '복구할 수 없어요. ' }),
     nb ? `${where || '이 위치'}에는 휴지통이 없어서 휴지통을 거치지 않고 바로 지워져요.` : '휴지통을 거치지 않고 바로 지워져요.'));
   if (blocked.length) body.append(blockedNote(blocked.map(b => ({ path: b.path, reason: b.protected_reason }))));
+  const wiped = wipedDupeGroups(items);
+  if (wiped.length) body.append(wipedNote(wiped));
   let agreed = false;
   const sync = () => { go.disabled = !agreed || !!blocked.length || !exist.length; };
-  body.append(checkRow(`${fmtNum(exist.length)}개 항목(${fmtBytes(ins.total)})을 되돌릴 수 없다는 것을 확인했어요`, v => { agreed = v; sync(); }));
+  const ackText = wiped.length
+    ? `남길 사본 없이 ${fmtNum(exist.length)}개 항목(${fmtBytes(ins.total)})을 지우고, 되돌릴 수 없다는 것을 확인했어요`
+    : `${fmtNum(exist.length)}개 항목(${fmtBytes(ins.total)})을 되돌릴 수 없다는 것을 확인했어요`;
+  body.append(checkRow(ackText, v => { agreed = v; sync(); }));
   sh.body.textContent = '';
   sh.body.append(body);
   sync();
@@ -1353,8 +1472,10 @@ async function confirmDelete(items, o = {}) {
     go.disabled = true; sh.busy = true;
     go.innerHTML = ic('spinner', 'spin') + '<span>지우는 중</span>';
     const okPaths = exist.map(x => x.path);
+    // 확인창이 보여 준 양 — 그 뒤 디스크에서 늘었으면 서버가 409 changed 로 거절한다(동의한 것보다 더 지우지 않게)
+    const expect = exist.map(x => ({ path: x.path, bytes: x.size || 0, files: x.files || 0 }));
     try {
-      const r = await POST('/api/ops/delete', { paths: okPaths, confirm: true });
+      const r = await POST('/api/ops/delete', { paths: okPaths, confirm: true, expect });
       const keys = okPaths.map(p => REG.byPath.get(pk(p))).filter(Boolean);
       Jobs.track(r.job_id, { kind: 'delete', keys, paths: okPaths });
       markPending(keys, true);
@@ -1366,6 +1487,7 @@ async function confirmDelete(items, o = {}) {
       sh.busy = false; sync();
       go.innerHTML = ic('trash') + '<span>영구 삭제</span>';
       sh.shake();
+      if (e.code === 'changed') { sh.body.append(grownNote(e.data, sh)); go.disabled = true; return; }
       sh.body.append(e.code === 'protected' ? blockedNote(e.data.blocked || []) : note('danger', 'warn', e.message));
     }
   });
@@ -1537,7 +1659,7 @@ function confirmEmptyBin(letters) {
     if (!pick.size || go.disabled) return;
     go.disabled = true; sh.busy = true;
     try {
-      const r = await POST('/api/ops/empty_bin', { drives: [...pick] });
+      const r = await POST('/api/ops/empty_bin', { drives: [...pick], confirm: true });
       Jobs.track(r.job_id, { kind: 'empty_bin', drives: [...pick] });
       sh.busy = false;
       sh.close();
@@ -1935,9 +2057,14 @@ const Jobs = {
       if (td && !hasBin(td)) { confirmUndoCopy(j, td); return; }
     }
     try {
-      const r = await POST('/api/ops/undo', { job_id: id });
+      const r = await POST('/api/ops/undo', force ? { job_id: id, confirm: true } : { job_id: id });
       Jobs.track(r.job_id, { kind: 'undo', undo_of: id });
-    } catch (e) { Toast.err(e, '되돌리지 못했어요'); }
+    } catch (e) {
+      // 화면이 몰랐던 「휴지통 없음」 — 영구 삭제가 되니 확인창부터
+      if (e.code === 'need_confirm' && j && j.type === 'copy') { confirmUndoCopy(j, driveOf(j.target) || { label: '복사한 위치' }); return; }
+      if (e.code === 'drive_changed') { Toast.show({ kind: 'err', title: '되돌리지 못했어요', sub: e.message + ' 원래 디스크를 다시 연결한 뒤 되돌려 주세요. 되돌리기 버튼은 그대로 남아 있어요.', timeout: 9000 }); return; }
+      Toast.err(e, '되돌리지 못했어요');
+    }
   },
   async cancel(id) {
     try { await POST('/api/ops/cancel', { job_id: id }); Poll.kick(); } catch (e) { Toast.err(e, '취소하지 못했어요'); }
@@ -2456,7 +2583,7 @@ async function setScanTarget(L, on) {
   if (r.settings) S.settings = r.settings;
   const d = driveOf(L);
   if (d) d.scan = on;
-  Toast.show({ kind: 'ok', title: on ? `${dname(d)}도 「모두 스캔」에 넣었어요` : `${dname(d)}는 「모두 스캔」에서 뺐어요`, sub: on ? null : '카드의 [스캔] 으로 따로 스캔할 수 있어요.', timeout: 3200 });
+  Toast.show({ kind: 'ok', title: on ? `${dname(d)}도 「모두 스캔」에 넣었어요` : `${josa(dname(d), '은', '는')} 「모두 스캔」에서 뺐어요`, sub: on ? null : '카드의 [스캔] 으로 따로 스캔할 수 있어요.', timeout: 3200 });
   Poll.kick();
   return true;
 }
@@ -2488,6 +2615,8 @@ function DriveCard(d0, o = {}) {
   const L = d0.letter;
   const icoBox = h('span', { class: 'dc-ic' });
   const nm = h('span', { class: 'dc-nm' });
+  // 이름 툴팁은 글자 수가 아니라 실제로 잘렸을 때만 단다(포인터가 올라오는 순간 판정 — Tip 보다 먼저 돈다)
+  nm.addEventListener('pointerover', () => { if (nm._full && nm.scrollWidth > nm.clientWidth + 1) nm.setAttribute('data-tip', nm._full); else nm.removeAttribute('data-tip'); });
   const kchip = h('span', { class: 'kchip' });
   const nbchip = h('span', { class: 'kchip nb', text: '휴지통 없음', 'data-tip': '이 위치는 휴지통이 없어요. 지우면 바로 영구 삭제돼요.' });
   const scanB = h('button', { class: 'ibtn sm scanbtn', type: 'button', 'data-tip': '다시 스캔', html: ic('scan') });
@@ -2514,7 +2643,7 @@ function DriveCard(d0, o = {}) {
     const k = driveIcon(d) + (conn ? '' : '-off');
     if (icoSig !== k) { icoSig = k; icoBox.textContent = ''; icoBox.append(tile('drive', driveIcon(d))); if (!conn) icoBox.append(h('span', { class: 'off-b', html: ic('unplug') })); }
     setH(nm, `${esc(dlabel(d))}${dtag(d) ? `<em>(${esc(dtag(d))})</em>` : ''}`);
-    if (dlabel(d).length > 12) nm.setAttribute('data-tip', dname(d) + (d.unc ? '\n' + d.unc : '')); else nm.removeAttribute('data-tip');
+    nm._full = dname(d) + (d.unc ? '\n' + d.unc : '');
     setT(kchip, kindLabel(d));
     kchip.hidden = !kchip.textContent;
     nbchip.hidden = hasBin(d) || !conn;
@@ -2782,10 +2911,10 @@ function CategoryList(L) {
     const i = isCat ? Number(k.slice(1)) : -1;
     const v = h('div', { class: 'v num' });
     const c = h('div', { class: 'c num' });
-    const meter = h('div', { class: 'meter' }, h('i', { style: { '--sc': k === 'bin' ? 'var(--cbin)' : k === 'un' ? 'var(--cun)' : `var(--${k})` } }));
-    const desc = isCat ? (catOf(i).desc || '') : k === 'bin' ? '휴지통으로 보낸 항목 · 비워야 공간이 생겨요' : '시스템 파일·권한 없는 폴더 등 스캔으로 확인하지 못한 공간';
+    const meter = h('div', { class: 'meter' }, h('i', { style: { '--sc': k === 'bin' ? 'var(--cbin)' : k === 'un' || k === 'ns' ? 'var(--cun)' : `var(--${k})` } }));
+    const desc = isCat ? (catOf(i).desc || '') : k === 'bin' ? '휴지통으로 보낸 항목 · 비워야 공간이 생겨요' : k === 'ns' ? '아직 스캔하지 않았어요 · 스캔하면 무엇이 차지하는지 보여 드려요' : '시스템 파일·권한 없는 폴더 등 스캔으로 확인하지 못한 공간';
     const el2 = h(isCat || k === 'bin' ? 'button' : 'div', { class: 'crow' + (isCat ? '' : k === 'bin' ? '' : ' static'), type: 'button', 'data-c': k },
-      tile(k, k === 'bin' ? 'trash' : k),
+      tile(k, k === 'bin' ? 'trash' : k === 'ns' ? 'scan' : k),
       h('div', { style: { minWidth: '0' } }, h('div', { class: 'n', text: segName(k) }), h('div', { class: 'd', text: desc }), meter),
       h('div', { class: 'r' }, v, c),
       isCat ? icEl('chevR', 'chev') : k === 'bin' ? h('span', { class: 'tdim', style: { fontSize: '12px' }, text: '' }) : h('span'));
@@ -2979,7 +3108,7 @@ function DriveScreen(route) {
     const conn = isConn(d);
     el.classList.toggle('dv-offline', !conn);
     const scanning = isScanning(L);
-    const sig = [scanning, d.scanned, d.stale, d.scanned_at, d.bin_bytes > 0, conn, d.scan, Math.floor(nowS() / 60)].join('|');
+    const sig = [scanning, d.scanned, d.stale, d.scanned_at, d.bin_bytes > 0, conn, d.scan, (d.also_as || []).join(','), Math.floor(nowS() / 60)].join('|');
     if (sig !== lastSig) {
       lastSig = sig;
       headIc.textContent = '';
@@ -2991,6 +3120,12 @@ function DriveScreen(route) {
       if (d.unc) sub.append(h('span', { class: 'dim', 'data-tip': d.unc }, pathEl(d.unc, 40)));
       if (d.stale) sub.append(h('span', { class: 'stale', html: ic('warn') + '<span>스캔 후 사용량이 바뀌었어요</span>' }));
       if (!hasBin(d) && conn) sub.append(h('span', { class: 'kchip nb', 'data-tip': '지우면 바로 영구 삭제돼요.', text: '휴지통 없음' }));
+      const twins = d.also_as || [];
+      if (twins.length) {
+        const lt = twins.filter(isLetterKey);
+        sub.append(h('span', { class: 'dim', 'data-tip': '같은 공유가 드라이브 문자와 「NAS 추가」 위치로 두 번 잡혀 있어요.\n한 번만 세도록 이 화면에 함께 보여요.',
+          text: lt.length ? `${lt.map(x => x + ':').join(', ')} 와 같은 공유` : 'NAS 위치로도 추가한 공유' }));
+      }
       acts.textContent = '';
       offBar.hidden = conn;
       if (!conn) {
@@ -3056,6 +3191,7 @@ function TreemapView(L) {
       try {
         tm = TM.create(wrap, {
           load: dirId => GET('/api/tree', { drive: L, dir: dirId == null ? 0 : dirId, depth: 2 }).then(r => r.node),
+          catName: cat => catName(cat == null || cat < 0 || cat > 10 ? 10 : cat),
           colorOf: cat => getComputedStyle(document.documentElement).getPropertyValue('--c' + (cat == null || cat < 0 || cat > 10 ? 10 : cat)).trim() || getComputedStyle(document.documentElement).getPropertyValue('--c10').trim(),
           formatSize: fmtBytes,
           onOpenItem: item => { if (item && item.path && item.kind !== 'dir') POST('/api/reveal', { path: item.path }).catch(e => Toast.err(e)); },
@@ -3594,6 +3730,7 @@ function DupesScreen() {
     try { const r = await POST('/api/dupes/verify', {}); Jobs.track(r.job_id, { kind: 'verify_dupes' }); } catch (e) { Toast.err(e, '확인을 시작하지 못했어요'); }
   });
   let items = [];
+  let dgs = [];   // 묶음: { name, verified, keys:Set, its:[] } — 확인창이 「남길 사본이 없는」 묶음을 알아본다
   async function load() {
     box.textContent = '';
     box.append(h('div', { class: 'loadmore' }, icEl('spinner', 'spin'), h('span', { text: '중복 파일을 찾는 중' })));
@@ -3604,13 +3741,18 @@ function DupesScreen() {
       box.textContent = '';
       regClear();
       items = [];
+      dgs = [];
       if (!groups.length) { box.append(h('div', { class: 'empty' }, h('div', { class: 'ill', html: ic('dupes') }), h('h3', { text: '중복 파일이 없어요' }), h('p', { text: '다른 위치에 있는 같은 이름·같은 크기의 파일을 찾지 못했어요.' }))); return; }
       groups.forEach((g, gi) => {
-        const vb = g.verified === true ? h('span', { class: 'vbadge yes', text: '내용 같음' }) : g.verified === false ? h('span', { class: 'vbadge no', text: '내용 다름' }) : h('span', { class: 'vbadge unk', text: '미확인' });
+        const vb = g.verified === true ? h('span', { class: 'vbadge yes', text: '앞·가운데·끝 같음', 'data-tip': '처음·가운데·끝 1MB 와 크기가 같아요.\n파일 전체를 비교한 것은 아니에요 — 마지막 사본을 지우기 전엔 직접 확인해 주세요.' }) : g.verified === false ? h('span', { class: 'vbadge no', text: '내용 다름', 'data-tip': '같은 이름·크기지만 내용이 달라요. 중복이 아니에요.' }) : h('span', { class: 'vbadge unk', text: '미확인' });
         const card = h('div', { class: 'card dg' }, h('div', { class: 'dg-h' }, tile('c4', 'dupes', 't-sm'), h('span', { class: 'n', text: g.name }), h('span', { class: 's num', text: `${fmtBytes(g.size)} × ${g.items.length}` }), vb, h('span', { class: 'sp' }), h('span', { class: 'w num', text: `낭비 ${fmtBytes(g.wasted)}` })));
         const rows = h('div', { class: 'rows', style: { padding: '0 0 6px' } });
+        const dg = { name: g.name, verified: g.verified, keys: new Set(), its: [] };
+        dgs.push(dg);
         g.items.forEach(x => {
-          const it = { key: x.key || `${x.drive}:file:${gi}:${x.path}`, drive: x.drive, kind: 'file', id: null, name: nameOf(x.path), path: x.path, size: g.size, metric: g.size, cat: null, cat_bytes: null, files: 1, mtime: x.mtime, protected: false, protected_reason: '' };
+          const it = { key: x.key || `${x.drive}:file:${gi}:${x.path}`, drive: x.drive, kind: 'file', id: null, name: nameOf(x.path), path: x.path, size: g.size, metric: g.size, cat: null, cat_bytes: null, files: 1, mtime: x.mtime, protected: false, protected_reason: '', _dg: dg };
+          dg.keys.add(it.key);
+          dg.its.push(it);
           items.push(it);
           const row = h('div', { class: 'row' + (S.sel.has(it.key) ? ' sel' : ''), 'data-key': it.key },
             h('button', { class: 'ck', type: 'button', html: ic('check') }),
@@ -3644,9 +3786,26 @@ function DupesScreen() {
   return {
     el, update() {},
     reload: load,
-    removeKeys(keys, how) { keys.forEach(k => { const r = REG.byKey.get(k); if (r && r.el) { r.el.classList.add(how, 'gone'); setTimeout(() => r.el.remove(), 380); } unregRow(k); }); },
+    removeKeys(keys, how) { keys.forEach(k => { const r = REG.byKey.get(k); if (r && r.el) { r.el.classList.add(how, 'gone'); setTimeout(() => r.el.remove(), 380); } if (r && r.it && r.it._dg) r.it._dg.keys.delete(k); unregRow(k); }); },
     refresh() { setTimeout(load, 500); },
-    selectAll() { Sel.set(items, true); },
+    /* Ctrl+A: 묶음마다 맨 위 사본 하나는 남기고 나머지를 고른다. 「내용 다름」 묶음은 진짜 중복이 아니라 고르지 않는다 */
+    selectAll() {
+      const keep = [], pick = [];
+      let diff = 0;
+      for (const g of dgs) {
+        const left = g.its.filter(it => g.keys.has(it.key) && !it._pending);
+        if (g.verified === false) { if (left.length > 1) diff++; keep.push(...left); continue; }
+        if (left.length < 2) { keep.push(...left); continue; }
+        keep.push(left[0]);
+        pick.push(...left.slice(1));
+      }
+      Sel.set(keep, false);
+      Sel.set(pick, true);
+      const picked = pick.filter(it => S.sel.has(it.key));
+      const tail = diff ? ` · 내용이 다른 ${fmtNum(diff)}묶음은 뺐어요` : '';
+      if (picked.length) Toast.show({ kind: 'info', title: '묶음마다 사본 하나씩 남기고 골랐어요', sub: `${fmtNum(picked.length)}개 · ${fmtBytes(sum(picked.map(i => i.size)))} · 맨 위 사본을 남겨요${tail}`, timeout: 3600 });
+      else Toast.show({ kind: 'info', title: '고를 사본이 없어요', sub: diff ? `내용이 다른 ${fmtNum(diff)}묶음은 고르지 않아요` : null, timeout: 2600 });
+    },
   };
 }
 
@@ -4557,6 +4716,38 @@ async function boot() {
   Poll.t = setTimeout(() => Poll.tick(), 400);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') Poll.kick(); });
 }
-window.DriveBoard = { fmtBytes, relTime, state: S };
+/* 창 닫기(X) — 이동·삭제가 진행 중이면 서버(window_closing)가 이걸 부른다. true = 물어봤다(창은 열린 채) */
+function askClose(st) {
+  st = st || {};
+  const jobs = st.jobs || [];
+  if (!jobs.length) return false;
+  const stay = h('button', { class: 'btn', type: 'button', text: '계속 쓰기' });
+  const quit = h('button', { class: 'btn solid-danger', type: 'button', text: '작업을 멈추고 닫기' });
+  const grace = Math.max(1, Math.round((st.grace_s || 120) / 60));
+  const list = h('div', { class: 'closejobs' }, ...jobs.slice(0, 4).map(j => h('div', { class: 'cj num' }, icEl(j.status === 'running' ? 'spinner' : 'clock', j.status === 'running' ? 'spin' : ''), h('span', { text: j.title || VERB[j.type] || '작업' }))),
+    jobs.length > 4 ? h('div', { class: 'cj', text: `외 ${fmtNum(jobs.length - 4)}개` }) : null);
+  const body = h('div', {}, list,
+    st.deleting
+      ? note('warn', 'warn', h('b', { text: '원본을 지우는 중인 항목이 있어요. ' }), `닫으면 그 항목은 마저 지운 뒤(최대 ${grace}분) 창이 닫혀요. 중간에 끊으면 원본과 대상에 나뉘어 남기 때문이에요.`)
+      : note('warn', 'info', h('b', { text: '지금 닫으면 진행 중인 작업을 멈춰요. ' }), '끝난 항목은 그대로 두고, 멈춘 항목은 작업 기록에 남아요. 원본은 지우기 전이라 그대로예요.'));
+  const sh = Sheet.open({ icon: h('span', { class: 'tile t-lg', html: ic('warn') }), title: '작업이 진행 중이에요', sub: `${fmtNum(jobs.length)}개 작업이 끝나지 않았어요`, body });
+  sh.primary = stay;
+  sh.setFoot([h('span', { class: 'hint', text: 'Esc 로 계속 쓰기' }), h('span', { class: 'sp' }), quit, stay]);
+  stay.addEventListener('click', () => sh.close());
+  quit.addEventListener('click', async () => {
+    if (quit.disabled) return;
+    quit.disabled = true; stay.disabled = true; sh.busy = true;
+    try {
+      const r = await POST('/api/app/close', {});
+      sh.setTitle('닫는 중이에요', r.deleting ? `지우던 항목을 마저 지운 뒤 닫혀요(최대 ${grace}분)` : '진행 중인 작업을 멈추고 있어요');
+      sh.setFoot([h('span', { class: 'hint', html: ic('spinner', 'spin') + ' 창이 곧 닫혀요' })]);
+    } catch (e) {
+      sh.busy = false; quit.disabled = false; stay.disabled = false;
+      sh.shake(); sh.body.append(note('danger', 'warn', e.message));
+    }
+  });
+  return true;
+}
+window.DriveBoard = { fmtBytes, relTime, state: S, askClose };
 boot();
 })();

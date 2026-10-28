@@ -5,7 +5,7 @@
 
 이 스크립트는 **자기가 만든 파일만** 다룬다.
 - %TEMP% 에 'DriveBoard-selftest-<id>' 이름의 파일·폴더를 만들어 휴지통으로 보내 본다(휴지통에 남는다).
-- 고정 드라이브가 둘 이상이면 두 번째 드라이브 최상위에 'DriveBoard-selftest-<id>' 폴더를 만들어
+- 내장 고정 드라이브가 둘 이상이면 두 번째 내장 드라이브 최상위에 'DriveBoard-selftest-<id>' 폴더를 만들어
   이동 → 되돌리기를 해 보고, 끝나면 그 폴더와 %TEMP% 의 폴더를 지운다.
 - 같은 방식으로 복사 → 되돌리기(복사본만 휴지통으로)도 해 본다. 원본은 그대로 남아야 한다.
 - 외장·USB·NAS 는 목록·종류·휴지통 유무만 읽는다(그 장치에는 아무것도 쓰지 않는다).
@@ -220,18 +220,17 @@ def main():
             return "WARN", "판별하지 못했어요(장치 질의 실패, 라벨에 SSD/HDD 없음)"
         run("SSD/HDD %s:" % d["letter"], t_kind)
 
-    # 3-2. 휴지통 유무(이동식은 $RECYCLE.BIN 이 이미 있을 때만, 네트워크는 없음)
+    # 3-2. 휴지통 유무(이동식·네트워크는 언제나 없음 — 이동식은 $RECYCLE.BIN 폴더가 남아 있어도 셸이 영구 삭제한다)
     def t_has_bin():
         out, bad = [], []
         for d in drives:
             if not d["connected"]:
                 continue
-            exists = os.path.isdir(d["root"] + "$RECYCLE.BIN") if d["kind"] != "network" else False
             out.append("%s=%s" % (d["letter"], "있음" if d["has_bin"] else "없음"))
             if d["kind"] == "network" and d["has_bin"]:
                 bad.append(d["letter"] + ": 네트워크인데 휴지통 있음")
-            if d["kind"] == "usb" and d["has_bin"] and not exists:
-                bad.append(d["letter"] + ": $RECYCLE.BIN 없는데 휴지통 있음")
+            if d["kind"] == "usb" and d["has_bin"]:
+                bad.append(d["letter"] + ": 이동식(USB 메모리·카드)인데 휴지통 있음")
         return (not bad), ", ".join(bad or out)
     run("휴지통 유무", t_has_bin)
 
@@ -363,8 +362,8 @@ def main():
         cands = sorted(drives, key=lambda d: (d["kind"] == "network", bool(d["external"]) or d["kind"] == "usb"))
         for d in cands:
             if (d["letter"] == tl or not d["connected"] or d["free"] < 400 * (1 << 20)
-                    or d["kind"] == "network" or not d["has_bin"]):
-                continue
+                    or d["kind"] in ("network", "usb") or d["external"] or not d["has_bin"]):
+                continue                     # 내장 드라이브에만 쓴다(외장·USB·NAS 에는 아무것도 쓰지 않는다)
             p = os.path.join(d["root"], TAG)
             try:
                 os.mkdir(p)
@@ -379,7 +378,7 @@ def main():
             return "SKIP", "TEMP 드라이브 없음"
         other, dest_dir = find_other()
         if other is None:
-            return "SKIP", "옮겨 볼 다른 고정 드라이브(여유 400MB 이상, 폴더 생성 가능)가 없어요"
+            return "SKIP", "옮겨 볼 다른 내장 고정 드라이브(여유 400MB 이상, 폴더 생성 가능)가 없어요"
         src_parent = os.path.join(temp, TAG + "-move")
         os.mkdir(src_parent)
         created.append(src_parent)
