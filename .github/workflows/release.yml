@@ -92,8 +92,12 @@ jobs:
 
       - name: Ensure app icon
         run: |
-          if (-not (Test-Path build\icon.ico)) { python tests\test_packaging.py --write-icon }
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path build\icon.ico)) { throw "build\icon.ico 를 만들지 못했습니다" }
+          # 저장소에 있으면 아무것도 안 돌린다 — 그때 $LASTEXITCODE 는 $null 이라 「-ne 0」 이 참이 된다(실제로 밟음).
+          if (-not (Test-Path build\icon.ico)) {
+            python tests\test_packaging.py --write-icon
+            if ($LASTEXITCODE -ne 0) { throw "아이콘 생성기가 실패했습니다" }
+          }
+          if (-not (Test-Path build\icon.ico)) { throw "build\icon.ico 를 만들지 못했습니다" }
 
       - name: Unit tests
         run: |
