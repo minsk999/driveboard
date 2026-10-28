@@ -13,6 +13,8 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+if os.name == "nt":      # 임시 폴더를 긴 이름으로(…\RUNNER~1\… → …\runneradmin\…): 제품이 경로를 긴 이름으로
+    tempfile.tempdir = os.path.realpath(tempfile.gettempdir())     # 돌려주므로 시험의 기대값도 같은 모양이어야 한다
 
 from core import model, settings, store  # noqa: E402
 from core import categories as C  # noqa: E402
@@ -261,7 +263,8 @@ class TestSettings(HomeCase):
         s = settings.save({"rules": [
             {"path": "/x", "cat": 2}, {"path": "/y", "cat": 42}, {"path": "", "cat": 1},
             {"cat": 1}, "junk", {"path": "/x/", "cat": "proxy"}, {"path": "/z", "cat": "app"}]})
-        self.assertEqual(s["rules"], [{"path": "/x", "cat": C.PROXY}, {"path": "/z", "cat": C.APP}])
+        self.assertEqual(s["rules"], [{"path": os.path.normpath("/x"), "cat": C.PROXY},       # Windows: '\\x'
+                                      {"path": os.path.normpath("/z"), "cat": C.APP}])
 
     def test_corrupt_file_gives_defaults(self):
         os.makedirs(self.home, exist_ok=True)

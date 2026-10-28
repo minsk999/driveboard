@@ -854,16 +854,19 @@ def build_member_plans(rng, now, S, clips):
 
 # ---------------------------------------------------------------- materialize
 
+def _k32():
+    import ctypes
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
 def mark_sparse(f):
-    """Windows(NTFS) 에선 truncate 만으로 희소 파일이 되지 않는다 — 실제로 디스크를 채운다
-    (CI windows 러너가 「디스크 공간 부족」으로 죽었다). FSCTL_SET_SPARSE 를 먼저 건다."""
+    """Windows(NTFS): FSCTL_SET_SPARSE 를 건다 — 이것만으로는 부족하다(set_sparse_size 참조)."""
     if os.name != "nt":
         return
     import ctypes
     import msvcrt
     from ctypes import wintypes
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    dic = k32.DeviceIoControl
+    dic = _k32().DeviceIoControl
     dic.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
                     wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
     dic.restype = wintypes.BOOL
@@ -873,11 +876,39 @@ def mark_sparse(f):
         raise OSError(ctypes.get_last_error(), "FSCTL_SET_SPARSE 실패 — 희소 파일을 만들 수 없어 중단합니다")
 
 
+def set_sparse_size(f, size):
+    """열린 파일 f 를 디스크를 쓰지 않고 size 바이트로 늘린다(희소 파일). 파일 위치는 그대로 둔다.
+
+    ★Windows 에서 f.truncate()/os.ftruncate() 로 늘리면 안 된다 — CPython 은 UCRT 의 _chsize_s 를
+    부르는데, 이 함수는 늘어난 구간을 **0 바이트를 실제로 써서** 채운다. 희소 플래그를 걸어 둬도
+    0 을 쓰는 순간 클러스터가 할당된다. 그래서 FSCTL_SET_SPARSE 를 건 뒤에도 CI windows 러너의
+    디스크가 가득 찼다(가짜 드라이브 small 한 벌의 겉보기 크기가 약 17TB). 그래서 Windows 에선
+    SetFileInformationByHandle(FileEndOfFileInfo) 로 파일 끝만 옮긴다 — 희소 파일이면 할당이 없다."""
+    if os.name != "nt":
+        f.truncate(size)
+        return
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    mark_sparse(f)
+    f.flush()
+
+    class _EOF(ctypes.Structure):
+        _fields_ = [("EndOfFile", ctypes.c_longlong)]
+
+    sfi = _k32().SetFileInformationByHandle
+    sfi.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    sfi.restype = wintypes.BOOL
+    info = _EOF(int(size))
+    h = wintypes.HANDLE(msvcrt.get_osfhandle(f.fileno()))
+    if not sfi(h, 6, ctypes.byref(info), ctypes.sizeof(info)):          # 6 = FileEndOfFileInfo
+        raise OSError(ctypes.get_last_error(), "파일 끝 옮기기 실패 — 희소 파일을 만들 수 없어 중단합니다")
+
+
 def _sparse(path, size, mtime):
     with open(path, "wb") as f:
         if size:
-            mark_sparse(f)
-            f.truncate(size)
+            set_sparse_size(f, size)
     os.utime(path, (mtime, mtime))
 
 

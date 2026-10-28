@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if os.name == "nt":      # 임시 폴더를 긴 이름으로(…\RUNNER~1\… → …\runneradmin\…): 제품이 경로를 긴 이름으로
+    tempfile.tempdir = os.path.realpath(tempfile.gettempdir())     # 돌려주므로 시험의 기대값도 같은 모양이어야 한다
 
 from core import media  # noqa: E402
 
@@ -143,9 +145,10 @@ class TestPure(unittest.TestCase):
             envd, appd = os.path.join(d, "env"), os.path.join(d, "app")
             os.makedirs(envd)
             os.makedirs(os.path.join(appd, "bin"))
-            for p in (os.path.join(envd, "ffmpeg"), os.path.join(envd, "ffprobe"),
-                      os.path.join(appd, "bin", "ffmpeg"), os.path.join(appd, "bin", "ffprobe")):
-                open(p, "w").close()
+            # 맨 이름(POSIX)과 .exe(Windows) 를 둘 다 둔다 — 아래에서 os.name 을 posix 로 바꿔 보기도 한다
+            for nm in ("ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe"):
+                for p in (os.path.join(envd, nm), os.path.join(appd, "bin", nm)):
+                    open(p, "w").close()
             with mock.patch.dict(os.environ, {"DRIVEBOARD_FFMPEG": envd}), \
                     mock.patch.object(media.os, "name", "posix"):
                 self.assertEqual(media.find_ffmpeg(appd),
@@ -155,9 +158,9 @@ class TestPure(unittest.TestCase):
             env = dict(os.environ)
             env.pop("DRIVEBOARD_FFMPEG", None)
             with mock.patch.dict(os.environ, env, clear=True):
-                self.assertEqual(media.find_ffmpeg(appd),
-                                 (os.path.join(appd, "bin", "ffmpeg"),
-                                  os.path.join(appd, "bin", "ffprobe")))
+                self.assertEqual(media.find_ffmpeg(appd),                       # Windows 에선 .exe 를 찾는다
+                                 (os.path.join(appd, "bin", media._exe("ffmpeg")),
+                                  os.path.join(appd, "bin", media._exe("ffprobe"))))
                 with mock.patch.object(media.shutil, "which", return_value=None):
                     self.assertEqual(media.find_ffmpeg(os.path.join(d, "none")), (None, None))
 

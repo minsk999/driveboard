@@ -20,6 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
+if os.name == "nt":      # 임시 폴더를 긴 이름으로(…\RUNNER~1\… → …\runneradmin\…): 제품이 경로를 긴 이름으로
+    tempfile.tempdir = os.path.realpath(tempfile.gettempdir())     # 돌려주므로 시험의 기대값도 같은 모양이어야 한다
 
 import app as app_mod                                   # noqa: E402
 from core import categories as C                        # noqa: E402
@@ -129,8 +131,7 @@ def _sparse(p, size, head=b"", mid=b""):
     """큰 희소 파일 — 앞(head)·가운데(mid)만 실제 바이트(quick_hash 가 읽는 곳)."""
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "wb") as f:
-        make_fake_drives.mark_sparse(f)
-        f.truncate(size)
+        make_fake_drives.set_sparse_size(f, size)    # Windows 에서 truncate 는 0 을 실제로 쓴다
         if head:
             f.write(head)
         if mid:

@@ -12,9 +12,12 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+if os.name == "nt":      # 임시 폴더를 긴 이름으로(…\RUNNER~1\… → …\runneradmin\…): 제품이 경로를 긴 이름으로
+    tempfile.tempdir = os.path.realpath(tempfile.gettempdir())     # 돌려주므로 시험의 기대값도 같은 모양이어야 한다
 
 from core import model, scanner  # noqa: E402
 from core import categories as C  # noqa: E402
+from core.categories import strip_long_prefix  # noqa: E402
 from make_fake_drives import make, write_tree  # noqa: E402
 
 MB = 1 << 20
@@ -145,7 +148,8 @@ class TestWalk(Tmp):
         locked = self.P("locked")
 
         def fake(p):
-            if os.path.normpath(p) == locked:
+            # Windows 에선 스캐너가 \\\\?\\ 접두사를 붙여 부른다(_scan_path) — 떼고 비교한다
+            if os.path.normpath(strip_long_prefix(p)) == locked:
                 raise PermissionError(13, "denied", p)
             return real(p)
         with mock.patch.object(scanner.os, "scandir", side_effect=fake):
@@ -183,8 +187,15 @@ class TestWalk(Tmp):
         self.assertIsNotNone(model.find_item(idx, self.P("a [b]/x#1.mov")))
 
     def test_long_path_prefix_only_on_windows(self):
-        self.assertEqual(model._scan_path("/x/y"), "/x/y")
         self.assertFalse(scanner.IS_NT and os.name != "nt")
+        if os.name != "nt":
+            self.assertEqual(model._scan_path("/x/y"), "/x/y")
+            return
+        # Windows: 확장 길이 접두사(긴 경로·끝 점/공백 이름도 열 수 있게)를 붙이고, 이미 있으면 그대로
+        self.assertEqual(model._scan_path("/x/y"), "\\\\?\\" + os.path.abspath("/x/y"))
+        self.assertEqual(model._scan_path("D:\\a\\b"), "\\\\?\\D:\\a\\b")
+        self.assertEqual(model._scan_path("\\\\srv\\share\\a"), "\\\\?\\UNC\\srv\\share\\a")
+        self.assertEqual(model._scan_path("\\\\?\\D:\\a"), "\\\\?\\D:\\a")
 
 
 class TestSubtree(Tmp):
