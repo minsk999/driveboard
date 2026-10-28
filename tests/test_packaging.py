@@ -528,7 +528,7 @@ class Spec(unittest.TestCase):
         self.assertIn("'ProductVersion', '1.1.0-rc.1'", ver)     # release.yml 이 태그와 그대로 대조한다
         self.assertIn("filevers': (1, 1, 0, 0)", ver)              # 숫자 칸은 X.Y.Z 만
         self.assertIn("'flags': 2", ver)                           # VS_FF_PRERELEASE
-        self.assertIn("'flags': 0", repr(run_spec(self._tree(with_ffmpeg=True))["exe"].kw["version"]))
+        self.assertIn("'flags': 0", repr(run_spec(self._with_version("1.1.0"))["exe"].kw["version"]))   # 정식판
         self.assertEqual(V.version_tuple("1.1.0-rc.1"), (1, 1, 0, 0))
 
     def test_bad_version_rejected(self):
