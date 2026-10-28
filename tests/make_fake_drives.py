@@ -439,7 +439,17 @@ _FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 
 
 def _ffmpeg():
-    return os.environ.get("DRIVEBOARD_FFMPEG") or shutil.which("ffmpeg")
+    """앱과 같은 순서로 찾는다(core.media.find_ffmpeg: DRIVEBOARD_FFMPEG → <앱>/bin → PATH).
+    다르게 찾으면 앱은 bin\\ffmpeg.exe 를 쓰는데 가짜 영상은 자리표시자라 미리보기가 실패한다
+    (릴리스 CI 에서 실제로 밟음 — bin 에만 ffmpeg 가 있었다)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from core import media
+        return media.find_ffmpeg()[0]
+    except Exception:
+        return os.environ.get("DRIVEBOARD_FFMPEG") or shutil.which("ffmpeg")
 
 
 def media_cache_dir():
