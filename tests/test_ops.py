@@ -501,6 +501,13 @@ class MoveTests(Base):
             j = q.get(jid)
             self.assertEqual(j["bytes_total"], 10)                 # 실행하며 실제 크기로 고친다
             self.assertIn(src, sizes)
+            # on_job_done 은 상태가 끝남으로 바뀌고 기록을 저장한 **뒤** 불린다 — 상태만 보고 바로 세면
+            # 저장(fsync)이 느린 Windows 러너에서 아직 안 불린 때를 잡는다. 불릴 때까지 기다린다.
+            t0 = time.time()
+            while (not any(c[0] == "done" and c[1]["id"] == jid for c in self.calls)
+                   and time.time() - t0 < 10):
+                time.sleep(0.02)
+            time.sleep(0.1)                                         # 두 번 불리지 않는지도 본다
             done = [c[1] for c in self.calls if c[0] == "done" and c[1]["id"] == jid]
             self.assertEqual(len(done), 1)
             self.assertPublic(done[0])
