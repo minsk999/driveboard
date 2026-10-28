@@ -200,7 +200,7 @@ Playwright 스크립트는 모두 실제 `app.py --no-open --fake` 를 띄우고
 업데이트 확인을 끄려면 `DRIVEBOARD_NO_UPDATE_CHECK=1`.
 
 배포본 만들기: `build.bat`(ffmpeg 내려받기·sha256 확인 → 시험 → PyInstaller → `dist\DriveBoard-Windows.zip`).
-`v*` 태그를 올리면 GitHub Actions(`release.yml`)가 같은 일을 하고 릴리스에 붙입니다. ffmpeg 고지는 `THIRD-PARTY.txt`.
+`v*` 태그를 올리거나, GitHub Actions 의 **release → [Run workflow]** 에 태그(예 `v1.0.0`)를 넣으면 같은 일을 하고 릴리스에 붙입니다(태그 = `v` + `core/version.py` VERSION, `-` 가 있으면 시험판). ffmpeg 고지는 `THIRD-PARTY.txt`.
 
 ## Windows 에서 처음 확인할 것
 
@@ -251,4 +251,4 @@ Playwright 스크립트는 모두 실제 `app.py --no-open --fake` 를 띄우고
 21. **보안 관문**: WebView2 가 `Sec-Fetch-Site: same-origin` 을 보내는지(안 보내면 헤더 없음으로 통과 — 정상). 화면이 「앱이 다시 시작됐어요」 배너만 띄우면 토큰 문제이니 알려 주세요.
     영상이 안 나오면 `/media/…` 요청의 응답 코드(403·404)를 알려 주세요.
 22. **OneDrive 폴더**: 「필요할 때 다운로드」 파일은 보호 이유와 함께 거부되는 게 정상입니다(미리보기도 만들지 않음).
-23. 목록의 이름이 `file~1.mp4` 처럼 8.3 짧은 이름 모양이면 보호로 거부될 수 있습니다(의도된 과잉 보호).
+23. **8.3 짧은 이름**: `C:\PROGRA~1\…` 같은 경로가 긴 이름으로 펼쳐져 같은 보호 규칙을 받는지(펼칠 수 없는 짧은 이름만 거부).
