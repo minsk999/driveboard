@@ -18,6 +18,7 @@ from array import array
 
 from .categories import NCAT
 from .model import DriveIndex
+from .safety import expand_short_names
 
 MAGIC = b"DBIDX\x00\x01\x00"
 VERSION = 3          # 3: d_vid (대표 영상 후보, SPEC-2 B.3) + d_aep (편집 프로젝트 파일 폴더)
@@ -46,7 +47,7 @@ def data_dir(create=True):
             p = os.path.join(os.path.expanduser("~"), ".driveboard")
     if create:
         os.makedirs(p, exist_ok=True)
-    return p
+    return expand_short_names(p)        # 8.3 짧은 이름 → 긴 이름(캐시 경로 비교가 문자열 비교라서)
 
 
 def atomic_write(path, data):

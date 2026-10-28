@@ -95,7 +95,104 @@ def mod_for(s, flavor=None):
     return posixpath
 
 
-def _check_nt_component(c):
+# ───────────────────────────── 8.3 짧은 이름 펼치기 ──────────────────────────────
+# 'C:\\Users\\KIMMIN~1\\AppData\\Local\\Temp' 처럼 짧은 이름(8.3)이 섞인 경로는 사용자 PC 에 흔하다
+# (TEMP 환경 변수, 옛 도구가 넘겨준 경로). 짧은 이름을 그대로 두고 규칙을 대면 'PROGRA~1' 이 Program Files
+# 인 줄 모르고 지나치므로 예전엔 통째로 거부했다 — 그러면 그런 PC 에선 아무것도 다룰 수 없다.
+# 지금은 디스크에 **있는** 부분을 GetLongPathNameW 로 긴 이름으로 바꾼 뒤 판정한다. 없는(펼칠 수 없는)
+# 부분이 여전히 짧은 이름처럼 생겼으면 그때만 거부한다. 펼친 부분은 실제 이름이 확인된 것이라
+# 'ABC~1' 이 진짜 긴 이름이어도 받아들인다(NTFS 는 한 폴더에서 긴·짧은 이름이 겹치지 않게 한다).
+
+def _looks_short(c):
+    return bool(_SHORT_NAME.match(c)) and len(c.split(".", 1)[0]) <= 8
+
+
+def _win_long_name():
+    """GetLongPathNameW 래퍼(Windows 만). 실패하면 None 을 돌려주는 함수."""
+    import ctypes
+    from ctypes import wintypes
+    fn = ctypes.WinDLL("kernel32", use_last_error=True).GetLongPathNameW
+    fn.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    fn.restype = wintypes.DWORD
+
+    def long_name(p):
+        q = p
+        if len(p) >= 240:                       # MAX_PATH 를 넘으면 확장 길이 접두사로 묻는다
+            q = ("\\\\?\\UNC\\" + p[2:]) if p.startswith("\\\\") else ("\\\\?\\" + p)
+        size = 512
+        for _ in range(3):
+            buf = ctypes.create_unicode_buffer(size)
+            n = fn(q, buf, size)
+            if n == 0:
+                return None                     # 없음·접근 불가 → 펼치지 않는다
+            if n < size:
+                r = buf.value
+                if q is not p:
+                    r = ("\\\\" + r[8:]) if r[:8].upper() == "\\\\?\\UNC\\" else r[4:]
+                return r
+            size = n + 1
+        return None
+    return long_name
+
+
+try:
+    _long_name = _win_long_name() if IS_WIN else None
+except Exception:                               # pragma: no cover — kernel32 이 없을 리는 없지만
+    _long_name = None
+
+
+def _anchor_len(p):
+    """'D:\\…' → 2, '\\\\srv\\share\\…' → 공유까지의 길이. 그 뒤의 조각만 펼친다."""
+    return len(ntpath.splitdrive(p)[0])
+
+
+def _expand_nt(p):
+    """(펼친 경로, 실제로 확인된 조각 수). 짧은 이름처럼 보이는 조각이 없으면 (p, 0) 그대로."""
+    if _long_name is None or "~" not in p:
+        return p, 0
+    comps = [c for c in re.split(r"[\\/]", p[_anchor_len(p):]) if c not in ("", ".")]
+    short = [i for i, c in enumerate(comps) if _looks_short(c)]
+    if not short or any(c == ".." or ":" in c or c.endswith((".", " ")) for c in comps):
+        return p, 0                             # 그 밖의 애매한 모양은 펼치지 않고 그대로 거부되게 둔다
+    anchor = ntpath.splitdrive(p)[0]
+    if not anchor or ":" in anchor[2:]:
+        return p, 0
+    for n in range(len(comps), short[0], -1):   # 가장 긴 「있는」 앞부분(짧은 이름을 하나 이상 포함)
+        head = anchor + "\\" + "\\".join(comps[:n])
+        try:
+            r = _long_name(head)
+        except Exception:
+            r = None
+        if not r:
+            continue
+        rc = [c for c in re.split(r"[\\/]", r[_anchor_len(r):]) if c not in ("", ".")]
+        if len(rc) != n or _anchor_len(r) != len(anchor):
+            return p, 0                         # 모양이 바뀌었다(이상한 경우) → 펼치지 않는다
+        return anchor + "\\" + "\\".join(rc + comps[n:]), n
+    return p, 0
+
+
+def expand_short_names(path):
+    """8.3 짧은 이름이 든 경로를 디스크에 있는 데까지 긴 이름으로 바꾼다(Windows 만, 그 밖엔 그대로).
+
+    짧은 이름처럼 보이는 조각이 없으면 디스크를 읽지 않는다. 경로 모양(구분자·접두사)은 되도록 보존한다."""
+    if not isinstance(path, str) or _long_name is None or "~" not in path:
+        return path
+    p = path
+    pre = ""
+    if p.startswith("\\\\?\\") and p[4:8].upper() == "UNC\\":
+        pre, p = "\\\\?\\UNC\\", "\\\\" + p[8:]
+    elif p.startswith("\\\\?\\"):
+        pre, p = "\\\\?\\", p[4:]
+    q, n = _expand_nt(p)
+    if not n:
+        return path
+    if pre == "\\\\?\\UNC\\":
+        return pre + q[2:]
+    return pre + q
+
+
+def _check_nt_component(c, verified=False):
     if c.endswith(".") or c.endswith(" "):
         raise _Bad(R_NAME)                      # 'Windows.' 는 'Windows' 로 해석된다
     if ":" in c:
@@ -105,8 +202,8 @@ def _check_nt_component(c):
     stem = c.split(".", 1)[0].rstrip(" ").casefold()
     if stem in _RESERVED:
         raise _Bad(R_NAME)                      # CON, NUL … 장치 이름
-    if _SHORT_NAME.match(c) and len(c.split(".", 1)[0]) <= 8:
-        raise _Bad(R_NAME)                      # PROGRA~1 같은 8.3 짧은 이름
+    if not verified and _looks_short(c):
+        raise _Bad(R_NAME)                      # PROGRA~1 같은 8.3 짧은 이름(펼칠 수 없었던 것)
 
 
 def _split(path, flavor=None):
@@ -126,8 +223,9 @@ def _split(path, flavor=None):
                 p = "\\\\" + rest[4:]                # 확장 길이 UNC → 일반 UNC
             else:
                 raise _Bad(R_NETWORK)
+        p, nver = _expand_nt(p)
         if p[:2] in ("\\\\", "//", "\\/", "/\\"):
-            return _split_unc(mod, p)
+            return _split_unc(mod, p, nver)
         m = _DRIVE.match(p)
         if not m or m.group(2) is None:
             raise _Bad(R_RELATIVE)              # 'Windows', '\\Windows', 'C:Windows', 'C:'
@@ -138,7 +236,7 @@ def _split(path, flavor=None):
                 continue
             if c == "..":
                 raise _Bad(R_DOTDOT)
-            _check_nt_component(c)
+            _check_nt_component(c, verified=len(comps) < nver)
             comps.append(c)
         return mod, drive, comps
     if not path.startswith("/"):
@@ -153,7 +251,7 @@ def _split(path, flavor=None):
     return mod, "", comps
 
 
-def _split_unc(mod, p):
+def _split_unc(mod, p, nver=0):
     """'\\\\srv\\share\\a' → (ntpath, '\\\\srv\\share', ['a']). 서버·공유 이름이 이상하면 _Bad."""
     parts = re.split(r"[\\/]", p[2:])
     if len(parts) < 2:
@@ -171,7 +269,7 @@ def _split_unc(mod, p):
             continue
         if c == "..":
             raise _Bad(R_DOTDOT)
-        _check_nt_component(c)
+        _check_nt_component(c, verified=len(comps) < nver)
         comps.append(c)
     return mod, "\\\\" + server + "\\" + share, comps
 

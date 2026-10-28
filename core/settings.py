@@ -7,6 +7,7 @@ import threading
 import unicodedata
 
 from .categories import cat_id
+from .safety import expand_short_names
 from .store import atomic_write, data_dir
 
 DEFAULTS = {
@@ -89,7 +90,7 @@ def _paths(v):
         p = p.strip()
         if not p or len(p) > MAX_PATH_LEN or "\0" in p:
             continue
-        p = os.path.normpath(p)
+        p = os.path.normpath(expand_short_names(p))      # 8.3 짧은 이름 → 긴 이름(스캔 경로와 맞게)
         k = _path_key(p)
         if k in seen:
             continue
@@ -115,7 +116,7 @@ def _rules(v):
         p = p.strip()
         if not p or len(p) > MAX_PATH_LEN or "\0" in p:
             continue
-        p = os.path.normpath(p)
+        p = os.path.normpath(expand_short_names(p))      # 8.3 짧은 이름 → 긴 이름(스캔 경로와 맞게)
         k = _path_key(p)
         if k in by_key:
             order.remove(k)

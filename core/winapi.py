@@ -285,11 +285,17 @@ class _QuietErrors:
 
 # ─────────────────────────────── 공통 ───────────────────────────────────────────
 
+def _safety():
+    from . import safety          # safety 는 core 의 다른 모듈을 import 하지 않는다(순환 없음)
+    return safety
+
+
 def set_fake_root(path):
     """가짜 드라이브 루트를 정한다. None 이면 해제(Windows 에선 실제 API 로 돌아간다)."""
     global _fake_root
     with _lock:
-        _fake_root = os.path.abspath(path) if path else None
+        # 8.3 짧은 이름(…\\RUNNER~1\\…)은 긴 이름으로 — 안 그러면 safety 가 루트를 못 알아본다
+        _fake_root = _safety().expand_short_names(os.path.abspath(path)) if path else None
         _usage_cache.clear()
 
 

@@ -94,6 +94,31 @@ def _int(v, default=0, lo=None, hi=None):
     return n
 
 
+# 요청 본문·쿼리에서 경로를 담는 키. 8.3 짧은 이름(…\\KIMMIN~1\\…)은 여기서 한 번 긴 이름으로 바꿔
+# 인덱스·보호 규칙·작업이 모두 같은 모양의 경로를 보게 한다(safety 도 스스로 펼치지만, 인덱스 조회·
+# 확인한 양 대조처럼 문자열을 그대로 비교하는 곳이 있다). 'label' 같은 표시용 값은 건드리지 않는다.
+_PATH_KEYS = frozenset({"path", "paths", "dest_dir", "initial", "expect", "add", "remove"})
+
+
+def _canon_paths(v, depth=0):
+    if isinstance(v, str):
+        return safety.expand_short_names(v)
+    if depth > 3:
+        return v
+    if isinstance(v, list):
+        return [_canon_paths(x, depth + 1) for x in v]
+    if isinstance(v, dict):
+        return {k: (_canon_paths(x, depth + 1) if k in _PATH_KEYS else x) for k, x in v.items()}
+    return v
+
+
+def canon_request(b):
+    """API 요청(dict)의 경로 값들을 긴 이름으로(Windows 만 — 그 밖엔 그대로)."""
+    if not isinstance(b, dict):
+        return b
+    return {k: (_canon_paths(v) if k in _PATH_KEYS else v) for k, v in b.items()}
+
+
 def _dkey(x):
     """화면·API 의 드라이브 키 정규형: 'd'→'D', 'n-3FA9C1'→'N-3fa9c1', 연결 안 된 장치 '~XXXX'. 틀리면 ''."""
     if not isinstance(x, str):
@@ -1294,6 +1319,7 @@ class App:
         p = res[0] if isinstance(res, (list, tuple)) else res
         if not isinstance(p, str) or not p:
             return {"ok": True, "path": None, "canceled": True}
+        p = safety.expand_short_names(p)
         d = self.drive_for_path(p)
         return {"ok": True, "path": p, "canceled": False, "drive": _letter(d) if d else None,
                 "known": d is not None}
@@ -1921,7 +1947,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._focus()
         if not is_api:
             return self._static(u.path)
-        qs = {k: v[-1] for k, v in parse_qs(u.query, keep_blank_values=True).items()}
+        qs = canon_request({k: v[-1] for k, v in parse_qs(u.query, keep_blank_values=True).items()})
         self._dispatch(lambda: self._get(u.path, qs))
 
     def do_POST(self):
@@ -1933,7 +1959,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, "not_found", "없는 주소예요.")
 
         def run():
-            return self._post(u.path, self._body())
+            return self._post(u.path, canon_request(self._body()))
         self._dispatch(run)
 
     def _dispatch(self, fn):

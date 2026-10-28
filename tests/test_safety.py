@@ -244,8 +244,13 @@ class SafetyVectors(unittest.TestCase):
         self._home = os.environ.get("DRIVEBOARD_HOME")
         os.environ["DRIVEBOARD_HOME"] = "/nonexistent-driveboard-home-for-tests"
         safety.set_extra_protected([])
+        # 손으로 쓴 벡터는 순수 문자열 판정을 본다 — Windows 러너에선 C:\\PROGRA~1 이 실제로 있어서
+        # 짧은 이름 펼치기가 켜져 있으면 결과가 그 PC 디스크에 따라 달라진다(펼치기는 ShortNames 에서 본다).
+        self._long = safety._long_name
+        safety._long_name = None
 
     def tearDown(self):
+        safety._long_name = self._long
         if self._home is None:
             os.environ.pop("DRIVEBOARD_HOME", None)
         else:
@@ -415,6 +420,137 @@ class SafetyVectors(unittest.TestCase):
         if not safety.IS_WIN:
             self.assertIs(safety.mod_for("D:\\x"), ntpath)
             self.assertIs(safety.mod_for("/x"), posixpath)
+
+
+class ShortNames(unittest.TestCase):
+    """8.3 짧은 이름: 디스크에 있는 부분은 긴 이름으로 펼쳐 판정하고, 펼칠 수 없으면 거부한다."""
+
+    # 가짜 디스크: 짧은 이름 → 긴 이름 (대소문자 무시). 여기 없는 경로는 「없음」.
+    DISK = {
+        "c:\\progra~1": "C:\\Program Files",
+        "c:\\progra~1\\adobe": "C:\\Program Files\\Adobe",
+        "c:\\users": "C:\\Users",
+        "c:\\users\\runner~1": "C:\\Users\\runneradmin",
+        "c:\\users\\runner~1\\appdata": "C:\\Users\\runneradmin\\AppData",
+        "c:\\users\\runner~1\\appdata\\local": "C:\\Users\\runneradmin\\AppData\\Local",
+        "c:\\users\\runner~1\\appdata\\local\\temp":
+            "C:\\Users\\runneradmin\\AppData\\Local\\Temp",
+        "c:\\users\\runner~1\\appdata\\local\\temp\\db-x":
+            "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\db-x",
+        "d:\\abc~1": "D:\\ABC~1",                     # 긴 이름이 정말로 'ABC~1' 인 폴더
+        "\\\\nas\\share\\projec~1": "\\\\nas\\share\\Project Archive",
+    }
+
+    def setUp(self):
+        self._long = safety._long_name
+        self.calls = []
+
+        def fake(p):
+            self.calls.append(p)
+            return self.DISK.get(p.casefold())
+        safety._long_name = fake
+        self.drives = [{"letter": "C", "root": "C:\\"}, {"letter": "D", "root": "D:\\"},
+                       {"letter": "N-1", "root": "\\\\nas\\share", "kind": "network", "network": True}]
+
+    def tearDown(self):
+        safety._long_name = self._long
+
+    def test_existing_short_path_is_expanded(self):
+        tmp = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\db-x"
+        long_ = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\db-x"
+        self.assertEqual(safety.expand_short_names(tmp), long_)
+        self.assertEqual(safety.normalize(tmp + "\\a.mov", flavor="nt"), long_ + "\\a.mov")
+        self.assertEqual(safety.check(tmp + "\\a.mov", self.drives, flavor="nt"), (True, ""))
+        d, rel = safety.drive_of(tmp + "\\new\\b.mov", self.drives, flavor="nt")
+        self.assertEqual(rel, ["Users", "runneradmin", "AppData", "Local", "Temp", "db-x", "new", "b.mov"])
+
+    def test_protection_applies_to_expanded_form(self):
+        # 짧은 이름이 Program Files 를 가리키면 시스템 폴더로 막는다(이름 거부가 아니라)
+        self.assertEqual(safety.check("C:\\PROGRA~1\\Adobe", self.drives, flavor="nt"),
+                         (False, safety.R_SYSDIR))
+        self.assertEqual(safety.check("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp", self.drives,
+                                      flavor="nt"), (False, safety.R_TEMP))
+        self.assertEqual(safety.check("C:\\Users\\RUNNER~1", self.drives, flavor="nt"),
+                         (False, safety.R_PROFILE))
+
+    def test_unexpandable_short_name_still_refused(self):
+        self.assertEqual(safety.check("C:\\Users\\KOOMIN~1\\Desktop\\x", self.drives, flavor="nt"),
+                         (False, safety.R_NAME))
+        # 앞부분은 펼쳤지만 짧은 이름처럼 생긴 조각이 디스크에 없다 → 거부
+        self.assertEqual(safety.check("C:\\Users\\RUNNER~1\\NEWDIR~1\\x", self.drives, flavor="nt"),
+                         (False, safety.R_NAME))
+        self.assertIsNone(safety.normalize("C:\\Users\\RUNNER~1\\NEWDIR~1", flavor="nt"))
+
+    def test_real_long_name_that_looks_short_is_allowed(self):
+        self.assertEqual(safety.check("D:\\ABC~1\\x.mov", self.drives, flavor="nt"), (True, ""))
+
+    def test_other_ambiguous_forms_not_expanded(self):
+        self.calls.clear()
+        for p, why in (("C:\\PROGRA~1.\\x", safety.R_NAME), ("C:\\PROGRA~1 \\x", safety.R_NAME),
+                       ("C:\\PROGRA~1\\a.txt:s", safety.R_NAME),
+                       ("C:\\PROGRA~1\\..\\Windows", safety.R_NAME)):
+            self.assertEqual(safety.check(p, self.drives, flavor="nt"), (False, why), p)
+        self.assertEqual(self.calls, [])               # 디스크에 묻지도 않는다
+
+    def test_no_disk_access_without_tilde(self):
+        self.calls.clear()
+        self.assertEqual(safety.check("D:\\proj\\a.mov", self.drives, flavor="nt"), (True, ""))
+        self.assertEqual(safety.expand_short_names("D:\\proj~x\\a"), "D:\\proj~x\\a")
+        self.assertEqual(self.calls, [])
+
+    def test_unc_and_prefixed(self):
+        self.assertEqual(safety.expand_short_names("\\\\nas\\share\\PROJEC~1\\a"),
+                         "\\\\nas\\share\\Project Archive\\a")
+        self.assertEqual(safety.expand_short_names("\\\\?\\UNC\\nas\\share\\PROJEC~1"),
+                         "\\\\?\\UNC\\nas\\share\\Project Archive")
+        self.assertEqual(safety.expand_short_names("\\\\?\\C:\\PROGRA~1\\x"),
+                         "\\\\?\\C:\\Program Files\\x")
+        self.assertEqual(safety.check("\\\\nas\\share\\PROJEC~1\\a", self.drives, flavor="nt"),
+                         (True, ""))
+
+    def test_roots_and_extra_protected_with_short_names(self):
+        # 가짜 드라이브 루트·보호 폴더에 짧은 이름이 있어도 알아본다(예전엔 조용히 건너뛰었다)
+        tmp = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\db-x"
+        drives = [{"letter": "D", "root": tmp}]
+        self.assertEqual(safety.check(tmp + "\\a", drives, flavor="nt"), (True, ""))
+        long_ = safety.expand_short_names(tmp)
+        self.assertEqual(safety.check(long_ + "\\a", drives, flavor="nt"), (True, ""))
+        safety.set_extra_protected([tmp + "\\a"])
+        try:
+            self.assertEqual(safety.check(long_ + "\\a\\b", drives, flavor="nt"), (False, safety.R_SELF))
+        finally:
+            safety.set_extra_protected([])
+
+    def test_off_windows_is_noop(self):
+        safety._long_name = None
+        self.assertEqual(safety.expand_short_names("C:\\PROGRA~1\\x"), "C:\\PROGRA~1\\x")
+        self.assertEqual(safety.check("C:\\PROGRA~1\\x", self.drives, flavor="nt"), (False, safety.R_NAME))
+
+
+@unittest.skipUnless(os.name == "nt", "Windows 전용 — 실제 GetLongPathNameW")
+class ShortNamesOnWindows(unittest.TestCase):
+    def test_real_temp_dir(self):
+        import ctypes
+        import tempfile
+        from ctypes import wintypes
+        d = tempfile.mkdtemp(prefix="db short name ")
+        try:
+            gs = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+            gs.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            gs.restype = wintypes.DWORD
+            buf = ctypes.create_unicode_buffer(1024)
+            n = gs(d, buf, 1024)
+            short = buf.value if 0 < n < 1024 else d
+            long_ = os.path.realpath(d)
+            if "~" not in short:
+                self.skipTest("이 볼륨은 8.3 짧은 이름을 만들지 않아요")
+            self.assertEqual(os.path.normcase(safety.expand_short_names(short)), os.path.normcase(long_))
+            drives = [{"letter": "T", "root": os.path.dirname(long_)}]
+            self.assertEqual(safety.check(os.path.join(short, "x.mov"), drives), (True, ""))
+            self.assertEqual(os.path.normcase(safety.normalize(os.path.join(short, "x.mov"))),
+                             os.path.normcase(os.path.join(long_, "x.mov")))
+        finally:
+            os.rmdir(d)
 
 
 if __name__ == "__main__":
