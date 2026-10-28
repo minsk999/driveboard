@@ -81,10 +81,14 @@ jobs:
           Copy-Item -Path (Join-Path $src 'bin\ffprobe.exe') -Destination bin\ffprobe.exe
           Copy-Item -Path (Join-Path $src 'LICENSE') -Destination bin\FFmpeg-LICENSE.txt
           Copy-Item -Path (Join-Path $src 'README.txt') -Destination bin\FFmpeg-README.txt
-          & .\bin\ffmpeg.exe -hide_banner -version | Select-Object -First 1
+          # 파이프를 Select-Object -First 1 로 일찍 끊으면 ffmpeg 가 쓰기 실패로 0 이 아닌 코드로 끝난다 — 출력을 다 받은 뒤 고른다.
+          $v = & .\bin\ffmpeg.exe -hide_banner -version
           if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe 실행 실패" }
-          & .\bin\ffprobe.exe -hide_banner -version | Select-Object -First 1
+          $v | Select-Object -First 1
+          # 파이프를 Select-Object -First 1 로 일찍 끊으면 ffprobe 가 쓰기 실패로 0 이 아닌 코드로 끝난다 — 출력을 다 받은 뒤 고른다.
+          $v = & .\bin\ffprobe.exe -hide_banner -version
           if ($LASTEXITCODE -ne 0) { throw "ffprobe.exe 실행 실패" }
+          $v | Select-Object -First 1
 
       - name: Ensure app icon
         run: |
