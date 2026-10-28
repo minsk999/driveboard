@@ -25,6 +25,7 @@ import app as app_mod                                   # noqa: E402
 from core import categories as C                        # noqa: E402
 from core import dupes, model, scanner, store, winapi   # noqa: E402
 from core import settings as settings_mod               # noqa: E402
+import make_fake_drives                                 # noqa: E402
 
 MB = 1 << 20
 GB = 1 << 30
@@ -128,6 +129,7 @@ def _sparse(p, size, head=b"", mid=b""):
     """큰 희소 파일 — 앞(head)·가운데(mid)만 실제 바이트(quick_hash 가 읽는 곳)."""
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "wb") as f:
+        make_fake_drives.mark_sparse(f)
         f.truncate(size)
         if head:
             f.write(head)

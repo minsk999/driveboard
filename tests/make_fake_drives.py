@@ -854,9 +854,29 @@ def build_member_plans(rng, now, S, clips):
 
 # ---------------------------------------------------------------- materialize
 
+def mark_sparse(f):
+    """Windows(NTFS) 에선 truncate 만으로 희소 파일이 되지 않는다 — 실제로 디스크를 채운다
+    (CI windows 러너가 「디스크 공간 부족」으로 죽었다). FSCTL_SET_SPARSE 를 먼저 건다."""
+    if os.name != "nt":
+        return
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    dic = k32.DeviceIoControl
+    dic.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                    wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    dic.restype = wintypes.BOOL
+    got = wintypes.DWORD(0)
+    h = wintypes.HANDLE(msvcrt.get_osfhandle(f.fileno()))
+    if not dic(h, 0x000900C4, None, 0, None, 0, ctypes.byref(got), None):   # FSCTL_SET_SPARSE
+        raise OSError(ctypes.get_last_error(), "FSCTL_SET_SPARSE 실패 — 희소 파일을 만들 수 없어 중단합니다")
+
+
 def _sparse(path, size, mtime):
     with open(path, "wb") as f:
         if size:
+            mark_sparse(f)
             f.truncate(size)
     os.utime(path, (mtime, mtime))
 
