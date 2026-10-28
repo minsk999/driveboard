@@ -4,5 +4,6 @@ _shots/
 dist/
 /build/*
 !/build/icon.ico
+!/build/DriveBoard.exe.config
 *.log
 bin/

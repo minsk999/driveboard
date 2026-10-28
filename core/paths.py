@@ -60,3 +60,28 @@ def ffmpeg_app_dir() -> str:
         if os.path.isfile(os.path.join(d, _exe("ffmpeg"))):
             return os.path.dirname(d)
     return resource_dir()
+
+
+_UNBLOCK_EXT = (".dll", ".pyd", ".exe")
+
+
+def unblock_bundle(root=None, force=False) -> int:
+    """인터넷에서 받은 zip 을 탐색기로 풀면 모든 파일에 「인터넷에서 받음」 표식(Zone.Identifier 스트림)이 붙는다.
+    .NET 은 그 표식이 있는 DLL 을 거부해 pythonnet 이 「Failed to resolve Python.Runtime.Loader.Initialize」로
+    죽고 앱 창이 안 뜬다(시험판 첫 실행에서 실제로 밟음 — CI 러너 파일엔 표식이 없어 자가 점검은 통과했다).
+    배포본 폴더의 실행 파일·DLL 에서 그 표식만 지운다 = PowerShell Unblock-File 과 같다. 지운 개수를 돌려준다.
+    Windows 배포본에서만 동작한다(force 는 시험용). 실패는 조용히 넘긴다 — 표식 제거는 최선 노력일 뿐이다."""
+    if os.name != "nt" or not (force or is_frozen()):
+        return 0
+    removed = 0
+    base = root or app_dir()
+    for dp, _dns, fns in os.walk(base):
+        for fn in fns:
+            if not fn.lower().endswith(_UNBLOCK_EXT):
+                continue
+            try:
+                os.remove(os.path.join(dp, fn) + ":Zone.Identifier")
+                removed += 1
+            except OSError:
+                pass
+    return removed

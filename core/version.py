@@ -4,7 +4,7 @@
 표준 라이브러리만 쓰고 아무것도 임포트하지 않는다 — driveboard.spec 이 정규식으로도 읽는다.
 """
 
-VERSION = "1.0.0-rc.1"
+VERSION = "1.0.0-rc.2"
 REPO = "minsk999/driveboard"
 
 APP_NAME = "DriveBoard"

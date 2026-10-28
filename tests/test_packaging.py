@@ -323,6 +323,42 @@ class Version(unittest.TestCase):
 
 
 class Paths(unittest.TestCase):
+    def test_unblock_noop_off_windows_or_source(self):
+        from core import paths
+        if os.name != "nt":
+            self.assertEqual(paths.unblock_bundle(force=True), 0)
+        self.assertEqual(paths.unblock_bundle(), 0)          # 소스 실행에선 손대지 않는다
+
+    @unittest.skipUnless(os.name == "nt", "NTFS 대체 데이터 스트림은 Windows 에만")
+    def test_unblock_removes_zone_identifier(self):
+        # 인터넷에서 받은 zip 을 풀면 붙는 표식 — 남아 있으면 .NET 이 pythonnet DLL 을 거부한다(시험판에서 실제로 밟음).
+        from core import paths
+        tmp = tempfile.mkdtemp()
+        try:
+            sub = os.path.join(tmp, "_internal", "pythonnet", "runtime")
+            os.makedirs(sub)
+            dll = os.path.join(sub, "Python.Runtime.dll")
+            txt = os.path.join(tmp, "notes.txt")
+            for f in (dll, txt):
+                with open(f, "wb") as fh:
+                    fh.write(b"x")
+                with open(f + ":Zone.Identifier", "w") as fh:
+                    fh.write("[ZoneTransfer]\nZoneId=3\n")
+            self.assertEqual(paths.unblock_bundle(root=tmp, force=True), 1)
+            self.assertFalse(os.path.exists(dll + ":Zone.Identifier"))
+            self.assertTrue(os.path.exists(txt + ":Zone.Identifier"))      # DLL·exe·pyd 만
+            with open(dll, "rb") as fh:
+                self.assertEqual(fh.read(), b"x")                           # 본문은 그대로
+            self.assertEqual(paths.unblock_bundle(root=tmp, force=True), 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_exe_config_shipped(self):
+        cfg = os.path.join(ROOT, "build", "DriveBoard.exe.config")
+        self.assertIn('loadFromRemoteSources enabled="true"', _read(cfg))
+        self.assertIn("DriveBoard.exe.config", _read(os.path.join(ROOT, ".github", "workflows", "release.yml")))
+        self.assertIn("DriveBoard.exe.config", _read(os.path.join(ROOT, "build.bat")))
+
     def test_source_layout(self):
         from core import paths
         self.assertFalse(paths.is_frozen())

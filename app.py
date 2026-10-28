@@ -2285,6 +2285,36 @@ def _apply_dark_titlebar(title):
         pass
 
 
+def _window_failed(url, err):
+    """앱 창(pywebview·WebView2)을 못 띄웠을 때: 원인을 남기고, 알리고, 기본 브라우저로 연다."""
+    msg = ("앱 창을 열지 못해 기본 브라우저로 열게요.\n\n"
+           "압축 파일을 받은 그대로 풀었다면 Windows 가 붙인 「인터넷에서 받음」 표식 때문일 수 있어요. "
+           "zip 파일 → 마우스 오른쪽 → 속성 → 「차단 해제」를 체크한 뒤 다시 풀면 앱 창으로 열려요.\n\n"
+           "원인: %s: %s" % (type(err).__name__, err))
+    try:
+        print("DriveBoard: 창 열기 실패 — %s: %s" % (type(err).__name__, err), file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(store.data_dir(), "window-error.log"), "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            mb = ctypes.windll.user32.MessageBoxW
+            mb.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+            mb.restype = ctypes.c_int
+            mb(None, msg, "DriveBoard", 0x40)            # MB_ICONINFORMATION
+        except Exception:
+            pass
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
 def selftest_gui():
     """배포본 자가 진단(--selftest-gui): 창을 띄우지 않고 네이티브 창 스택(pywebview·WinForms·EdgeChromium·pythonnet·
     WebView2 어셈블리)이 실제로 올라오는지만 본다. 0 = 정상, 1 = 실패(무엇이 빠졌는지 기록). 서버는 띄우지 않는다."""
@@ -2333,6 +2363,13 @@ def main(argv=None):
             logf = open(os.devnull, "w", encoding="utf-8")
         sys.stdout = sys.stdout or logf
         sys.stderr = sys.stderr or logf
+    try:
+        from core import paths as _paths
+        n = _paths.unblock_bundle()
+        if n:
+            print("DriveBoard: 「인터넷에서 받음」 표식 %d개를 지웠어요(앱 창 DLL 로드용)" % n, flush=True)
+    except Exception:
+        pass
     if a.selftest_gui:
         return selftest_gui()
     single = not a.no_open and not a.multi
@@ -2426,7 +2463,16 @@ def main(argv=None):
                 kw["storage_path"] = os.path.join(store.data_dir(), "webview")
         except (TypeError, ValueError):
             pass
-        webview.start(**kw)
+        try:
+            webview.start(**kw)
+        except Exception as e:  # noqa: BLE001 — 창 스택이 안 올라와도 앱은 브라우저로 쓸 수 있어야 한다
+            app.window = None
+            _window_failed(url, e)
+            try:
+                while t.is_alive():
+                    t.join(1.0)
+            except KeyboardInterrupt:
+                pass
     finally:
         app.window = None
         srv.shutdown()

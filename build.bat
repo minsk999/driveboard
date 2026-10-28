@@ -91,6 +91,7 @@ if not exist "dist\DriveBoard\_internal\ui\index.html" (
   goto fail
 )
 copy /y "THIRD-PARTY.txt" "dist\DriveBoard\THIRD-PARTY.txt" > nul || goto fail
+copy /y "build\DriveBoard.exe.config" "dist\DriveBoard\DriveBoard.exe.config" > nul || goto fail
 
 echo   [6/6] dist\DriveBoard-Windows.zip
 if exist "dist\DriveBoard-Windows.zip" del /q "dist\DriveBoard-Windows.zip"
