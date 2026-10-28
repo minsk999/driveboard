@@ -655,7 +655,9 @@ class Workflows(unittest.TestCase):
         self.assertIn("ExitCode", smoke["run"])
         self.assertLess(smoke["run"].index("--selftest-gui"), smoke["run"].index("@('--no-open'"))
         # prerelease 태그(v1.1.0-rc.1)를 광고하므로 spec 도 그 VERSION 을 받는다(Spec.test_prerelease_version).
-        self.assertIn("contains(github.ref_name, '-')", text)
+        self.assertIn("contains(env.TAG, '-')", text)                      # 태그 push·수동 실행 공통
+        self.assertIn("TAG: ${{ inputs.tag || github.ref_name }}", text)
+        self.assertIn("workflow_dispatch", text)
 
     def test_tests_workflow(self):
         text = _read(TEST_WF_PATH)

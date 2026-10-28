@@ -7,12 +7,20 @@ name: release
 on:
   push:
     tags: ['v*']
+  # 태그를 직접 올릴 수 없는 환경용: [Run workflow] 에 태그 이름(v1.0.0-rc.1)을 넣으면
+  # 이 실행이 그 커밋(github.sha)에 태그를 만들며 릴리스한다. 규칙(태그 = v + VERSION)은 같다.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '릴리스 태그 (예: v1.0.0, v1.0.0-rc.1) — core/version.py VERSION 앞에 v'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -23,7 +31,7 @@ jobs:
       run:
         shell: pwsh
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ inputs.tag || github.ref_name }}
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
       DRIVEBOARD_NO_UPDATE_CHECK: '1'
@@ -179,11 +187,13 @@ jobs:
       - name: Create GitHub release (softprops/action-gh-release)
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          name: DriveBoard ${{ github.ref_name }}
+          name: DriveBoard ${{ env.TAG }}
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           body_path: release-body.md
           files: |
             DriveBoard-Windows.zip
             DriveBoard-Windows.zip.sha256
           fail_on_unmatched_files: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ !contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
+          make_latest: ${{ !contains(env.TAG, '-') }}
