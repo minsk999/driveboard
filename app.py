@@ -609,12 +609,17 @@ class App:
         if d is None:
             return
         L = _letter(d)
-        with self.lock:
-            self._note_dirty(L, path)
-            idx = self.indexes.get(L)
-            if idx is None:
-                return
-            scanner.refresh(idx, path, d, self.settings)
+        try:
+            with self.lock:
+                self._note_dirty(L, path)
+                idx = self.indexes.get(L)
+                if idx is None:
+                    return
+                scanner.refresh(idx, path, d, self.settings)
+        finally:
+            # 남은 공간·휴지통 캐시를 항목이 끝날 때마다 비운다. on_job_done 은 작업이 「끝남」으로 보인 뒤에 불려,
+            # 그 사이 폴링하면 화면이 최대 2초 옛 여유 공간을 보였다(Windows 릴리스 CI 에서 시험이 실제로 걸림).
+            self.invalidate()
 
     def _hook_job_done(self, job):
         self.invalidate()
