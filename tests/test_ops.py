@@ -40,15 +40,19 @@ def mkfile(path, size, mtime=None, seed=0):
     return path
 
 
+def _rel(p, top):
+    return os.path.relpath(p, top).replace(os.sep, "/")      # 키는 OS 와 무관하게 'sub/a.bin'
+
+
 def tree(top):
-    """{상대경로: ('d',) | ('f', size, sha)}"""
+    """{상대경로('/' 구분): ('d',) | ('f', size, sha)}"""
     out = {}
     for dp, dns, fns in os.walk(top):
         for d in dns:
-            out[os.path.relpath(os.path.join(dp, d), top)] = ("d",)
+            out[_rel(os.path.join(dp, d), top)] = ("d",)
         for f in fns:
             p = os.path.join(dp, f)
-            out[os.path.relpath(p, top)] = ("f", os.path.getsize(p), sha(p))
+            out[_rel(p, top)] = ("f", os.path.getsize(p), sha(p))
     return out
 
 
@@ -1447,12 +1451,24 @@ class DeviceLossTests(DeviceBase):
         self.q.chunk_size = 64 * 1024
         real = ops._write
         gone = os.path.join(self.tmp, "unplugged")
+        unplugged = []
+        real_alive = winapi.path_alive
+        nas_key = os.path.normcase(self.NAS)
 
         def w(f, data):
-            if os.path.exists(self.NAS):
+            if os.name == "nt":
+                # Windows 는 열린 파일(.dbpart)이 든 폴더의 이름을 바꾸지 못한다(PermissionError) — 폴더를
+                # 치우는 대신, 실제로 NAS 가 끊겼을 때처럼 path_alive 가 「없다」고 답하게 한다
+                unplugged.append(True)
+            elif os.path.exists(self.NAS):
                 os.rename(self.NAS, gone)                    # NAS 가 사라진다
             raise OSError(errno.EIO, "Input/output error")
-        with mock.patch.object(ops, "_write", w):
+
+        def alive(p, *a, **k):
+            if unplugged and os.path.normcase(str(p)).startswith(nas_key):
+                return False
+            return real_alive(p, *a, **k)
+        with mock.patch.object(ops, "_write", w), mock.patch.object(winapi, "path_alive", alive):
             j = self.wait(self.q.submit_move([top], self.NK, mode="move"))
         self.assertEqual(j["status"], "failed", j)
         self.assertEqual(j["results"][0]["error"], ops.R_DEVLOST)
